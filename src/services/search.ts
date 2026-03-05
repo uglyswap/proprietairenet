@@ -1,7 +1,7 @@
 /**
  * Service de recherche par SIREN et par dénomination
  * v2.5.0 - Réécrit pour utiliser proprietaires_geo (22M+ lignes géocodées)
- * Les anciennes tables pm_25_b_*/pb_25_b_* n'existent plus
+ * Les anciennes tables pm_25_b et pb_25_b n'existent plus
  */
 
 import { pool } from './database.js';
