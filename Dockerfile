@@ -2,8 +2,8 @@
 FROM node:20-alpine AS builder
 
 # Force rebuild - timestamp: 2025-12-05T17:00:00Z
-ARG CACHEBUST=20251205170000
-ARG BUILD_VERSION=v2.0.2-fix-columns
+ARG CACHEBUST=20260305191500
+ARG BUILD_VERSION=v2.5.0-proprietairenet
 
 WORKDIR /app
 
@@ -30,7 +30,7 @@ RUN echo "=== BUILD ${BUILD_VERSION} ===" && \
 # Production stage
 FROM node:20-alpine AS production
 
-ARG BUILD_VERSION=v2.0.2-fix-columns
+ARG BUILD_VERSION=v2.5.0-proprietairenet
 ENV BUILD_VERSION=${BUILD_VERSION}
 
 WORKDIR /app
