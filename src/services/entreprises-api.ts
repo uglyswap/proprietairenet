@@ -547,7 +547,7 @@ export async function searchEntreprises(denomination: string, limit?: number): P
     consecutive429s = 0;
     const results = response.data?.results;
     if (!results || results.length === 0) return [];
-    return Promise.all(results.map(r => mapToEntrepriseEnrichieExternal(r)));
+    return Promise.all(results.map((r: any) => mapToEntrepriseEnrichieExternal(r)));
   } catch (error: any) {
     if (error?.response?.status === 429) {
       consecutive429s++;
