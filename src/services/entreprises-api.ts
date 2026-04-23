@@ -5,6 +5,22 @@ import { EntrepriseEnrichie, Dirigeant, SiegeEntreprise, BeneficiaireEffectif } 
 // Configuration pour la résolution des bénéficiaires effectifs
 const MAX_DEPTH = 5; // Profondeur max de résolution des chaînes de PM
 
+// Cache en mémoire avec TTL (7 jours)
+interface CacheEntry {
+  data: EntrepriseEnrichie | null;
+  expiresAt: number;
+}
+
+const CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 jours
+const entreprisesCache = new Map<string, CacheEntry>();
+
+// Track consecutive 429 errors to enable fallback mode
+let consecutive429s = 0;
+const FALLBACK_THRESHOLD = 3; // Après 3 erreurs 429 consécutives, activer le fallback
+let fallbackMode = false;
+let lastFallbackCheck = 0;
+const FALLBACK_CHECK_INTERVAL = 5 * 60 * 1000; // Vérifier si l'API est revenue toutes les 5 min
+
 // Rate limiter simple pour respecter les 7 req/sec
 class RateLimiter {
   private timestamps: number[] = [];
@@ -51,10 +67,116 @@ class EntreprisesApiClient {
     this.rateLimiter = new RateLimiter(config.entreprisesApi.maxRequestsPerSecond);
   }
 
+  /**
+   * Vérifie si on est en mode fallback et si on peut en sortir
+   */
+  private checkFallbackMode(): void {
+    const now = Date.now();
+    
+    // Si on est en fallback, vérifier périodiquement si l'API est revenue
+    if (fallbackMode && now - lastFallbackCheck > FALLBACK_CHECK_INTERVAL) {
+      console.log('[EntreprisesAPI] Vérification si API disponible (sortie du mode fallback)');
+      fallbackMode = false;
+      consecutive429s = 0;
+      lastFallbackCheck = now;
+    }
+  }
+
+  /**
+   * Gère les erreurs 429 et active/désactive le mode fallback
+   */
+  private handleRateLimitError(siren: string): void {
+    consecutive429s++;
+    console.warn(`[EntreprisesAPI] Rate limit (429) pour SIREN ${siren} - erreur #${consecutive429s} consécutive`);
+    
+    if (consecutive429s >= FALLBACK_THRESHOLD && !fallbackMode) {
+      fallbackMode = true;
+      lastFallbackCheck = Date.now();
+      console.warn('[EntreprisesAPI] ⚠️ Mode fallback activé - trop d\'erreurs 429 consécutives');
+    }
+  }
+
+  /**
+   * Réinitialise le compteur d'erreurs après un succès
+   */
+  private handleSuccess(): void {
+    if (consecutive429s > 0) {
+      console.log(`[EntreprisesAPI] Succès API - reset du compteur d'erreurs (était à ${consecutive429s})`);
+    }
+    consecutive429s = 0;
+    if (fallbackMode) {
+      console.log('[EntreprisesAPI] Sortie du mode fallback - API revenue');
+      fallbackMode = false;
+    }
+  }
+
+  /**
+   * Vérifie le cache pour un SIREN donné
+   */
+  private getFromCache(siren: string): EntrepriseEnrichie | null | undefined {
+    const entry = entreprisesCache.get(siren);
+    if (!entry) return undefined; // Pas en cache
+    
+    if (Date.now() > entry.expiresAt) {
+      entreprisesCache.delete(siren);
+      return undefined; // Expiré
+    }
+    
+    return entry.data;
+  }
+
+  /**
+   * Stocke un résultat dans le cache
+   */
+  private setCache(siren: string, data: EntrepriseEnrichie | null): void {
+    entreprisesCache.set(siren, {
+      data,
+      expiresAt: Date.now() + CACHE_TTL_MS,
+    });
+  }
+
+  /**
+   * Génère un résultat de fallback basique à partir du SIREN seul
+   */
+  private createFallbackResult(siren: string): EntrepriseEnrichie {
+    return {
+      siren,
+      nom_complet: `Entreprise ${siren}`,
+      nom_raison_sociale: '',
+      sigle: null,
+      nature_juridique: '',
+      date_creation: '',
+      etat_administratif: 'inconnu',
+      categorie_entreprise: '',
+      tranche_effectif: 'Non renseigné',
+      siege: { adresse: '', code_postal: '', commune: '' },
+      dirigeants: [],
+      beneficiaires_effectifs: [],
+      nombre_etablissements: 0,
+    };
+  }
+
   // Recherche une entreprise par SIREN (avec résolution des bénéficiaires effectifs)
   async searchBySiren(siren: string): Promise<EntrepriseEnrichie | null> {
     if (!siren || siren.length !== 9) return null;
 
+    // 1. Vérifier le cache
+    const cached = this.getFromCache(siren);
+    if (cached !== undefined) {
+      console.log(`[EntreprisesAPI] Cache HIT pour SIREN ${siren}`);
+      return cached;
+    }
+
+    // 2. Vérifier le mode fallback
+    this.checkFallbackMode();
+    if (fallbackMode) {
+      console.log(`[EntreprisesAPI] Fallback mode - résultat basique pour SIREN ${siren}`);
+      const fallback = this.createFallbackResult(siren);
+      this.setCache(siren, fallback);
+      return fallback;
+    }
+
+    // 3. Appel API normal
     await this.rateLimiter.waitForSlot();
 
     try {
@@ -65,11 +187,32 @@ class EntreprisesApiClient {
         },
       });
 
-      const results = response.data?.results;
-      if (!results || results.length === 0) return null;
+      this.handleSuccess();
 
-      return await this.mapToEntrepriseEnrichie(results[0]);
-    } catch (error) {
+      const results = response.data?.results;
+      if (!results || results.length === 0) {
+        this.setCache(siren, null);
+        return null;
+      }
+
+      const enriched = await this.mapToEntrepriseEnrichie(results[0]);
+      this.setCache(siren, enriched);
+      return enriched;
+    } catch (error: any) {
+      if (error?.response?.status === 429) {
+        this.handleRateLimitError(siren);
+        
+        // Si on vient de passer en fallback, retourner un résultat basique
+        if (fallbackMode) {
+          console.log(`[EntreprisesAPI] Activation fallback pour SIREN ${siren}`);
+          const fallback = this.createFallbackResult(siren);
+          this.setCache(siren, fallback);
+          return fallback;
+        }
+        
+        return null;
+      }
+      
       console.error(`Erreur API Entreprises pour SIREN ${siren}:`, error);
       return null;
     }
@@ -78,6 +221,27 @@ class EntreprisesApiClient {
   // Recherche une entreprise par dénomination
   async searchByDenomination(denomination: string, limit: number = 5): Promise<EntrepriseEnrichie[]> {
     if (!denomination || denomination.trim().length < 2) return [];
+
+    // En mode fallback, retourner un résultat minimal
+    this.checkFallbackMode();
+    if (fallbackMode) {
+      console.log(`[EntreprisesAPI] Fallback mode - recherche par dénomination "${denomination}"`);
+      return [{
+        siren: '',
+        nom_complet: denomination,
+        nom_raison_sociale: denomination,
+        sigle: null,
+        nature_juridique: '',
+        date_creation: '',
+        etat_administratif: 'inconnu',
+        categorie_entreprise: '',
+        tranche_effectif: 'Non renseigné',
+        siege: { adresse: '', code_postal: '', commune: '' },
+        dirigeants: [],
+        beneficiaires_effectifs: [],
+        nombre_etablissements: 0,
+      }];
+    }
 
     await this.rateLimiter.waitForSlot();
 
@@ -89,6 +253,8 @@ class EntreprisesApiClient {
         },
       });
 
+      this.handleSuccess();
+
       const results = response.data?.results;
       if (!results || results.length === 0) return [];
 
@@ -98,7 +264,29 @@ class EntreprisesApiClient {
         mapped.push(await this.mapToEntrepriseEnrichie(r));
       }
       return mapped;
-    } catch (error) {
+    } catch (error: any) {
+      if (error?.response?.status === 429) {
+        this.handleRateLimitError('denomination');
+        if (fallbackMode) {
+          return [{
+            siren: '',
+            nom_complet: denomination,
+            nom_raison_sociale: denomination,
+            sigle: null,
+            nature_juridique: '',
+            date_creation: '',
+            etat_administratif: 'inconnu',
+            categorie_entreprise: '',
+            tranche_effectif: 'Non renseigné',
+            siege: { adresse: '', code_postal: '', commune: '' },
+            dirigeants: [],
+            beneficiaires_effectifs: [],
+            nombre_etablissements: 0,
+          }];
+        }
+        return [];
+      }
+      
       console.error(`Erreur API Entreprises pour "${denomination}":`, error);
       return [];
     }
@@ -107,6 +295,9 @@ class EntreprisesApiClient {
   // Récupère les dirigeants bruts d'un SIREN (pour la résolution récursive)
   private async fetchDirigeantsRaw(siren: string): Promise<any[]> {
     if (!siren || siren.length !== 9) return [];
+
+    // En mode fallback, pas de dirigeants
+    if (fallbackMode) return [];
 
     await this.rateLimiter.waitForSlot();
 
@@ -118,11 +309,18 @@ class EntreprisesApiClient {
         },
       });
 
+      this.handleSuccess();
+
       const results = response.data?.results;
       if (!results || results.length === 0) return [];
 
       return results[0].dirigeants || [];
-    } catch (error) {
+    } catch (error: any) {
+      if (error?.response?.status === 429) {
+        this.handleRateLimitError(siren);
+        return [];
+      }
+      
       console.error(`Erreur récupération dirigeants pour SIREN ${siren}:`, error);
       return [];
     }
@@ -301,6 +499,17 @@ class EntreprisesApiClient {
     };
 
     return tranches[code] || 'Non renseigné';
+  }
+
+  /**
+   * Retourne les stats du cache (pour monitoring)
+   */
+  getCacheStats(): { size: number; fallbackMode: boolean; consecutive429s: number } {
+    return {
+      size: entreprisesCache.size,
+      fallbackMode,
+      consecutive429s,
+    };
   }
 }
 
