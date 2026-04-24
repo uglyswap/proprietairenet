@@ -38,6 +38,30 @@ export async function enrichParcelles(parcelleIds: string[]): Promise<Map<string
   const unique = [...new Set(parcelleIds)];
   const results = new Map<string, any>();
 
+  // Initialize results for all parcelles
+  for (const pid of unique) {
+    results.set(pid, {
+      type_bien: null,
+      surface_parcelle: null,
+      surface_batie: null,
+      prix_m2: null,
+      date_derniere_transaction: null,
+      nb_transactions: 0,
+      est_copropriete: false,
+      nb_lots_total: null,
+      nb_lots_habitation: null,
+      nb_lots_tertiaire: null,
+      nom_copropriete: null,
+      annee_construction: null,
+      nb_niveaux: null,
+      nb_logements: null,
+      surface_lots_carrez: null,
+      type_transaction: null,
+      valeur_fonciere: null,
+      premiere_transaction: null,
+    });
+  }
+
   try {
     // 1. Query DVF + BDNB + Copro from immo_data
     const enrichQuery = `
@@ -107,12 +131,10 @@ export async function enrichParcelles(parcelleIds: string[]): Promise<Map<string
         SELECT DISTINCT ON (reference_cadastrale_1)
           reference_cadastrale_1 as parcelle_id,
           nom_d_usage_de_la_copropriete as nom_copro,
-          nb_lot_total,
-          nb_lot_habitation,
-          nb_lot_tertiaire,
-          annee_construction,
-          nb_niveau,
-          nb_logements
+          nombre_total_de_lots,
+          nombre_de_lots_a_usage_d_habitation,
+          annee_construction as copro_annee_construction,
+          periode_de_construction
         FROM copro.coproprietes
         WHERE reference_cadastrale_1 = ANY($1)
       )
@@ -136,12 +158,10 @@ export async function enrichParcelles(parcelleIds: string[]): Promise<Map<string
         b.l_nom_copro,
         b.numero_immat_principal,
         c.nom_copro,
-        c.nb_lot_total,
-        c.nb_lot_habitation,
-        c.nb_lot_tertiaire as copro_nb_lot_tertiaire,
-        c.annee_construction as copro_annee_construction,
-        c.nb_niveau as copro_nb_niveau,
-        c.nb_logements
+        c.nombre_total_de_lots,
+        c.nombre_de_lots_a_usage_d_habitation,
+        c.copro_annee_construction,
+        c.periode_de_construction
       FROM input_parcelles ip
       LEFT JOIN dvf_agg d ON d.id_parcelle = ip.parcelle_id
       LEFT JOIN bdnb_data b ON b.parcelle_id = ip.parcelle_id
@@ -150,37 +170,13 @@ export async function enrichParcelles(parcelleIds: string[]): Promise<Map<string
 
     const enrichResult = await enrichPool.query(enrichQuery, [unique]);
 
-    // Initialize results for all parcelles
-    for (const pid of unique) {
-      results.set(pid, {
-        type_bien: null,
-        surface_parcelle: null,
-        surface_batie: null,
-        prix_m2: null,
-        date_derniere_transaction: null,
-        nb_transactions: 0,
-        est_copropriete: false,
-        nb_lots_total: null,
-        nb_lots_habitation: null,
-        nb_lots_tertiaire: null,
-        nom_copropriete: null,
-        annee_construction: null,
-        nb_niveaux: null,
-        nb_logements: null,
-        surface_lots_carrez: null,
-        type_transaction: null,
-        valeur_fonciere: null,
-        premiere_transaction: null,
-      });
-    }
-
     // Populate from DVF/BDNB/Copro
     for (const row of enrichResult.rows) {
       const pid = row.parcelle_id;
       if (!pid) continue;
 
       const existing = results.get(pid) || {};
-      const estCopro = !!(row.nb_lot_tot || row.nb_lot_total || row.l_nom_copro || row.nom_copro);
+      const estCopro = !!(row.nb_lot_tot || row.nombre_total_de_lots || row.l_nom_copro || row.nom_copro);
 
       results.set(pid, {
         ...existing,
@@ -190,13 +186,13 @@ export async function enrichParcelles(parcelleIds: string[]): Promise<Map<string
         date_derniere_transaction: row.derniere_transaction || existing.date_derniere_transaction,
         nb_transactions: row.nb_transactions ? parseInt(row.nb_transactions) : existing.nb_transactions,
         est_copropriete: estCopro || existing.est_copropriete,
-        nb_lots_total: row.nb_lot_total || row.nb_lot_tot || existing.nb_lots_total,
-        nb_lots_habitation: row.nb_lot_habitation || existing.nb_lots_habitation,
-        nb_lots_tertiaire: row.copro_nb_lot_tertiaire || row.nb_lot_tertiaire || existing.nb_lots_tertiaire,
+        nb_lots_total: row.nombre_total_de_lots || row.nb_lot_tot || existing.nb_lots_total,
+        nb_lots_habitation: row.nombre_de_lots_a_usage_d_habitation || existing.nb_lots_habitation,
+        nb_lots_tertiaire: row.nb_lot_tertiaire || existing.nb_lots_tertiaire,
         nom_copropriete: row.nom_copro || row.l_nom_copro || existing.nom_copropriete,
-        annee_construction: row.copro_annee_construction || row.annee_construction_bdnb || existing.annee_construction,
-        nb_niveaux: row.copro_nb_niveau || row.nb_niveaux_bdnb || existing.nb_niveaux,
-        nb_logements: row.nb_logements || row.nb_log || existing.nb_logements,
+        annee_construction: row.copro_annee_construction || row.annee_construction_bdnb || row.periode_de_construction || existing.annee_construction,
+        nb_niveaux: row.nb_niveaux_bdnb || existing.nb_niveaux,
+        nb_logements: row.nb_log || existing.nb_logements,
         surface_lots_carrez: row.surface_lots_carrez || existing.surface_lots_carrez,
         type_transaction: row.type_local || existing.type_transaction,
         premiere_transaction: row.premiere_transaction || existing.premiere_transaction,
