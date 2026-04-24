@@ -133,7 +133,6 @@ export async function enrichParcelles(parcelleIds: string[]): Promise<Map<string
           nom_d_usage_de_la_copropriete as nom_copro,
           nombre_total_de_lots,
           nombre_de_lots_a_usage_d_habitation,
-          annee_construction as copro_annee_construction,
           periode_de_construction
         FROM copro.coproprietes
         WHERE reference_cadastrale_1 = ANY($1)
@@ -160,7 +159,6 @@ export async function enrichParcelles(parcelleIds: string[]): Promise<Map<string
         c.nom_copro,
         c.nombre_total_de_lots,
         c.nombre_de_lots_a_usage_d_habitation,
-        c.copro_annee_construction,
         c.periode_de_construction
       FROM input_parcelles ip
       LEFT JOIN dvf_agg d ON d.id_parcelle = ip.parcelle_id
@@ -190,7 +188,7 @@ export async function enrichParcelles(parcelleIds: string[]): Promise<Map<string
         nb_lots_habitation: row.nombre_de_lots_a_usage_d_habitation || existing.nb_lots_habitation,
         nb_lots_tertiaire: row.nb_lot_tertiaire || existing.nb_lots_tertiaire,
         nom_copropriete: row.nom_copro || row.l_nom_copro || existing.nom_copropriete,
-        annee_construction: row.copro_annee_construction || row.annee_construction_bdnb || row.periode_de_construction || existing.annee_construction,
+        annee_construction: row.periode_de_construction || row.annee_construction_bdnb || existing.annee_construction,
         nb_niveaux: row.nb_niveaux_bdnb || existing.nb_niveaux,
         nb_logements: row.nb_log || existing.nb_logements,
         surface_lots_carrez: row.surface_lots_carrez || existing.surface_lots_carrez,
