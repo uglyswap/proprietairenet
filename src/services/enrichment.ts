@@ -113,7 +113,7 @@ export async function enrichParcelles(parcelleIds: string[]): Promise<Map<string
           annee_construction,
           nb_niveau,
           nb_logements
-        FROM copro.copro
+        FROM copro.coproprietes
         WHERE reference_cadastrale_1 = ANY($1)
       )
       SELECT 
