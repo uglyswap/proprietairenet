@@ -316,6 +316,8 @@ export async function searchByDenomination(
     console.log(`[searchByDenomination] ${result.rows.length} lignes trouvées`);
 
     // Grouper par propriétaire (SIREN ou dénomination)
+    // FIX: Utiliser l'id de la ligne comme clé fallback au lieu de 'inconnu'
+    // pour éviter de grouper des propriétés sans SIREN sous une même clé
     const groupedMap = new Map<string, {
       rows: ProprietaireGeoRaw[];
       sirens: Set<string>;
@@ -323,7 +325,7 @@ export async function searchByDenomination(
     }>();
 
     for (const raw of result.rows) {
-      const key = raw.siren || raw.denomination || 'inconnu';
+      const key = raw.siren || raw.denomination || `no-siren-${raw.id}`;
 
       if (!groupedMap.has(key)) {
         groupedMap.set(key, { rows: [], sirens: new Set(), departements: new Set() });
