@@ -7,18 +7,9 @@ import Link from 'next/link';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { CreditCard, Loader2, Mail, ArrowLeft, ShoppingCart, Coins } from 'lucide-react';
+import { CreditCard, Loader2, Mail, ArrowLeft, Coins } from 'lucide-react';
 import { getAuthHeaders, getToken, getMe } from '@/lib/auth-client';
 import { toast } from 'sonner';
-
-const FEATURED_PACKS = [
-  { credits: 5000, price: 50, label: 'Découverte', letters: '~12', badge: null, badgeColor: '', highlight: false },
-  { credits: 10000, price: 100, label: 'Essentiel', letters: '~24', badge: null, badgeColor: '', highlight: false },
-  { credits: 20000, price: 200, label: 'Standard', letters: '~48', badge: null, badgeColor: '', highlight: false },
-  { credits: 50000, price: 500, label: 'Professionnel', letters: '~121', badge: '⭐ Best Seller', badgeColor: 'bg-blue-600 text-white', highlight: true },
-  { credits: 100000, price: 900, label: 'Business', letters: '~243', badge: '💰 -10%', badgeColor: 'bg-green-600 text-white', savings: 'Économisez 100€', highlight: false },
-  { credits: 235000, price: 2000, label: 'Megapack', letters: '~573', badge: '🔥 -15%', badgeColor: 'bg-gradient-to-r from-amber-500 to-orange-500 text-white', savings: 'Économisez 350€', mega: true, highlight: false },
-];
 
 const LETTER_COSTS = [
   { type: 'Lettre Verte', credits: 410 }, { type: 'Verte Suivie', credits: 490 },
@@ -39,20 +30,40 @@ function getDiscountLabel(credits: number): string {
   return 'tarif normal';
 }
 
+interface CreditPack {
+  id: string;
+  name: string;
+  credits: number;
+  price_euros: number;
+  sort_order: number;
+}
+
 export default function CreditsPage() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const [loading, setLoading] = useState(true);
   const [loadingPack, setLoadingPack] = useState<string | null>(null);
   const [creditAmount, setCreditAmount] = useState(20000);
-  const searchParams = useSearchParams();
+  const [currentBalance, setCurrentBalance] = useState(0);
+  const [creditPacks, setCreditPacks] = useState<CreditPack[]>([]);
+
+  // Fetch credit packs from API
+  useEffect(() => {
+    fetch('/api/plans')
+      .then(r => r.json())
+      .then(data => {
+        setCreditPacks(data.credit_packs || []);
+      })
+      .catch(() => {});
+  }, []);
 
   // Pre-select amount from URL query param
   useEffect(() => {
     const amount = searchParams.get("amount");
     if (amount) setCreditAmount(Math.max(100, parseInt(amount) || 20000));
   }, [searchParams]);
-  const [currentBalance, setCurrentBalance] = useState(0);
 
+  // Auth check
   useEffect(() => {
     const token = getToken();
     if (!token) { router.push('/login'); return; }
@@ -103,43 +114,62 @@ export default function CreditsPage() {
           <div className="px-4 py-2 rounded-full border bg-amber-50 border-amber-200 text-sm text-amber-700 font-medium">200 000+ = -15% 🔥</div>
         </div>
 
-        {/* Featured packs */}
+        {/* Featured packs from API */}
         <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4 mb-8">
-          {FEATURED_PACKS.map((pack, i) => (
-            <div key={i} className={`relative rounded-2xl border p-5 text-center transition-all cursor-pointer hover:shadow-lg ${
-              pack.highlight ? 'border-2 border-blue-500 shadow-xl bg-gradient-to-b from-blue-50 to-white' :
-              (pack as any).mega ? 'border-2 border-amber-400 shadow-xl bg-gradient-to-b from-amber-50 to-white' :
-              'border-gray-200 bg-white shadow-sm hover:border-blue-300'
-            }`} onClick={() => setCreditAmount(pack.credits)}>
-              {pack.badge && (
-                <div className="absolute -top-3 left-1/2 transform -translate-x-1/2">
-                  <span className={`text-xs font-bold px-3 py-1 rounded-full whitespace-nowrap ${pack.badgeColor}`}>{pack.badge}</span>
+          {creditPacks.map((pack) => {
+            const discountedPrice = getDiscountedPrice(pack.credits);
+            const discount = getDiscountLabel(pack.credits);
+            const isHighlighted = pack.credits >= 50000 && pack.credits < 100000;
+            const isMega = pack.credits >= 200000;
+
+            return (
+              <div key={pack.id} className={`relative rounded-2xl border p-5 text-center transition-all cursor-pointer hover:shadow-lg ${
+                isHighlighted ? 'border-2 border-blue-500 shadow-xl bg-gradient-to-b from-blue-50 to-white' :
+                isMega ? 'border-2 border-amber-400 shadow-xl bg-gradient-to-b from-amber-50 to-white' :
+                'border-gray-200 bg-white shadow-sm hover:border-blue-300'
+              }`} onClick={() => setCreditAmount(pack.credits)}>
+                {discount !== 'tarif normal' && (
+                  <div className="absolute -top-3 left-1/2 transform -translate-x-1/2">
+                    <span className={`text-xs font-bold px-3 py-1 rounded-full whitespace-nowrap ${
+                      isMega ? 'bg-gradient-to-r from-amber-500 to-orange-500 text-white' : 'bg-green-600 text-white'
+                    }`}>{discount}</span>
+                  </div>
+                )}
+                <h3 className="font-semibold text-gray-900 text-sm mt-2">{pack.name}</h3>
+                <div className={`text-xl font-bold my-1 ${isHighlighted ? 'text-blue-600' : isMega ? 'text-amber-600' : 'text-gray-900'}`}>
+                  {pack.credits.toLocaleString('fr-FR')}
                 </div>
-              )}
-              <h3 className="font-semibold text-gray-900 text-sm mt-1">{pack.label}</h3>
-              <div className={`text-xl font-bold my-1 ${pack.highlight ? 'text-blue-600' : (pack as any).mega ? 'text-amber-600' : 'text-gray-900'}`}>
-                {pack.credits.toLocaleString('fr-FR')}
+                <div className="text-xs text-gray-500 mb-1">crédits</div>
+                <div className="text-lg font-bold text-gray-900">{discountedPrice.toLocaleString('fr-FR')}€</div>
+                <div className="text-xs text-gray-500">~{Math.floor(pack.credits / 410)} lettres</div>
+                {discount !== 'tarif normal' && (
+                  <div className="text-xs text-green-600 font-medium mt-1">
+                    Au lieu de {(pack.credits / 100).toLocaleString('fr-FR')}€
+                  </div>
+                )}
+                <Button size="sm" className={`w-full mt-3 ${isHighlighted ? 'bg-blue-600 hover:bg-blue-700' : isMega ? 'bg-gradient-to-r from-amber-500 to-orange-500' : ''}`}
+                  variant={isHighlighted || isMega ? 'default' : 'outline'}
+                  onClick={(e) => { e.stopPropagation(); handleBuyCredits(pack.credits); }}
+                  disabled={!!loadingPack}>
+                  {loadingPack === String(pack.credits) ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Acheter'}
+                </Button>
               </div>
-              <div className="text-xs text-gray-500 mb-1">crédits</div>
-              <div className="text-lg font-bold text-gray-900">{pack.price.toLocaleString('fr-FR')}€</div>
-              <div className="text-xs text-gray-500">{pack.letters} lettres</div>
-              {(pack as any).savings && <div className="text-xs text-green-600 font-medium mt-1">{(pack as any).savings}</div>}
-              <Button size="sm" className={`w-full mt-3 ${pack.highlight ? 'bg-blue-600 hover:bg-blue-700' : (pack as any).mega ? 'bg-gradient-to-r from-amber-500 to-orange-500' : ''}`}
-                variant={pack.highlight || (pack as any).mega ? 'default' : 'outline'}
-                onClick={(e) => { e.stopPropagation(); handleBuyCredits(pack.credits); }}
-                disabled={!!loadingPack}>
-                {loadingPack === String(pack.credits) ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Acheter'}
-              </Button>
-            </div>
-          ))}
+            );
+          })}
         </div>
 
         {/* Slider for custom amount */}
         <Card className="mb-8">
           <CardContent className="pt-6 space-y-5">
             <div>
-              <div className="flex items-center justify-between mb-3"><label className="text-sm text-muted-foreground font-medium">Montant personnalisé</label><div className="flex items-center gap-2"><input type="number" min={100} step={100} value={creditAmount} onChange={(e) => { const v = parseInt(e.target.value) || 0; setCreditAmount(Math.max(100, v)); }} className="w-32 px-3 py-1.5 border rounded-lg text-sm text-right font-medium focus:outline-none focus:ring-2 focus:ring-blue-500" /><span className="text-xs text-gray-400">crédits</span></div></div>
-              <input type="range" min={1000} max={300000} step={1000} value={creditAmount}
+              <div className="flex items-center justify-between mb-3">
+                <label className="text-sm text-muted-foreground font-medium">Montant personnalisé</label>
+                <div className="flex items-center gap-2">
+                  <input type="number" min={100} step={100} value={creditAmount} onChange={(e) => { const v = parseInt(e.target.value) || 0; setCreditAmount(Math.max(100, v)); }} className="w-32 px-3 py-1.5 border rounded-lg text-sm text-right font-medium focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                  <span className="text-xs text-gray-400">crédits</span>
+                </div>
+              </div>
+              <input type="range" min={1000} max={300000} step={1000} value={Math.min(creditAmount, 300000)}
                 onChange={(e) => setCreditAmount(parseInt(e.target.value))}
                 className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-blue-600" />
               <div className="flex justify-between text-xs text-gray-400 mt-1">
