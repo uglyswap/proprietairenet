@@ -12,7 +12,7 @@ export async function GET(req: NextRequest) {
 
     // Get AI settings for the API key
     const settingsResult = await pool.query(
-      "SELECT api_key, provider FROM ai_settings WHERE id = 'default'"
+      "SELECT api_key, provider FROM ai_settings WHERE id = '00000000-0000-0000-0000-000000000000'"
     );
     const settings = settingsResult.rows[0];
 

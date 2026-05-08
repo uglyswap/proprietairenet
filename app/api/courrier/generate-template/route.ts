@@ -336,7 +336,7 @@ export async function POST(req: NextRequest) {
     if (type === 'custom') {
       // Get AI settings from DB
       const settingsResult = await pool.query(
-        "SELECT provider, model, api_key, system_prompt FROM ai_settings WHERE id = 'default'"
+        "SELECT provider, model, api_key, system_prompt FROM ai_settings WHERE id = '00000000-0000-0000-0000-000000000000'"
       );
       
       const settings = settingsResult.rows[0];
@@ -459,7 +459,7 @@ Rédige la lettre en suivant les instructions du prompt système.`;
 
     // Return all built-in templates
     const settingsResult = await pool.query(
-      "SELECT api_key FROM ai_settings WHERE id = 'default'"
+      "SELECT api_key FROM ai_settings WHERE id = '00000000-0000-0000-0000-000000000000'"
     );
     const hasAi = !!(settingsResult.rows[0]?.api_key);
 
