@@ -1,0 +1,9 @@
+node_modules
+.next
+.bolt
+*.zip
+.git
+README.md
+ADMIN_GUIDE.md
+ADMIN_CONFIG_FULLENRICH.md
+FULLENRICH_SETUP.md

@@ -1,0 +1,1097 @@
+'use client';
+
+import { useState, useEffect, useRef, useCallback } from 'react';
+import { useRouter } from 'next/navigation';
+import dynamic from 'next/dynamic';
+import Link from 'next/link';
+import { Button } from '@/components/ui/button';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Badge } from '@/components/ui/badge';
+import { toast } from 'sonner';
+import { Building2, Coins, LogOut, Search, Map, Loader2, Info, List, ShoppingCart, Settings, Crown, AlertTriangle, Mail, Target, Star, ScrollText, BookmarkPlus, Bookmark, Download, Menu, X, ChevronDown, Upload } from 'lucide-react';
+import TextSearchForm from '@/components/dashboard/TextSearchForm';
+import CsvUpload from '@/components/dashboard/CsvUpload';
+import ResultsList from '@/components/dashboard/ResultsList';
+import OnboardingWizard from '@/components/OnboardingWizard';
+import NotificationBell from '@/components/NotificationBell';
+import { CadastreResult } from '@/lib/types';
+import { Alert, AlertDescription } from '@/components/ui/alert';
+import { Input } from '@/components/ui/input';
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { Label } from '@/components/ui/label';
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
+import { getMe, getToken, getAuthHeaders, logout as clientLogout, ClientUser, ClientOrganization } from '@/lib/auth-client';
+
+const MapComponent = dynamic(() => import('@/components/dashboard/MapComponent'), {
+  ssr: false,
+  loading: () => (
+    <div className="h-full w-full flex items-center justify-center bg-muted">
+      <Loader2 className="h-8 w-8 animate-spin text-primary" />
+    </div>
+  ),
+});
+
+interface DashboardData {
+  role: string;
+  organization: any;
+  kpis: any;
+  recent_actions?: any[];
+  recent_searches?: any[];
+}
+
+interface SavedSearch {
+  id: string;
+  name: string;
+  query_params: any;
+  result_count: number;
+  last_run_at: string;
+  created_at: string;
+}
+
+export default function DashboardPage() {
+  const router = useRouter();
+  const [user, setUser] = useState<ClientUser | null>(null);
+  const [org, setOrg] = useState<ClientOrganization | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [results, setResults] = useState<CadastreResult[]>([]);
+  const [drawnPolygon, setDrawnPolygon] = useState<number[][] | null>(null);
+  const [selectedResults, setSelectedResults] = useState<Set<number>>(new Set());
+  const [searchTerm, setSearchTerm] = useState<string>('');
+  const [panelWidth, setPanelWidth] = useState(480);
+  const [dashMenuOpen, setDashMenuOpen] = useState(false);
+  const [mobileShowMap, setMobileShowMap] = useState(false);
+  const [highlightedIndex, setHighlightedIndex] = useState<number | undefined>(undefined);
+  const [lastSearchWasText, setLastSearchWasText] = useState(true);
+  const isResizing = useRef(false);
+
+  const handleMouseDown = useCallback((e: React.MouseEvent) => {
+    isResizing.current = true;
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    const onMove = (ev: MouseEvent) => {
+      if (!isResizing.current) return;
+      const newWidth = Math.min(800, Math.max(280, ev.clientX));
+      setPanelWidth(newWidth);
+    };
+    const onUp = () => {
+      isResizing.current = false;
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  }, []);
+  const [showUpgradePrompt, setShowUpgradePrompt] = useState(false);
+  const [showOnboarding, setShowOnboarding] = useState(false);
+  const [searchesRemaining, setSearchesRemaining] = useState<number | null>(null);
+  const [dashData, setDashData] = useState<DashboardData | null>(null);
+  const [savedSearches, setSavedSearches] = useState<SavedSearch[]>([]);
+  const [showSaveDialog, setShowSaveDialog] = useState(false);
+  const [saveSearchName, setSaveSearchName] = useState('');
+  const [lastSearchParams, setLastSearchParams] = useState<any>(null);
+
+  useEffect(() => {
+    checkUser();
+  }, []);
+
+  const checkUser = async () => {
+    try {
+      const data = await getMe();
+      if (!data) {
+        router.push('/login');
+        return;
+      }
+      setUser(data.user);
+      setOrg(data.organization);
+      
+      // Check onboarding status
+      try {
+        const onbRes = await fetch('/api/user/onboarding', { headers: getAuthHeaders() });
+        if (onbRes.ok) {
+          const onbData = await onbRes.json();
+          if (!onbData.onboarding_completed) {
+            setShowOnboarding(true);
+          }
+        }
+      } catch {}
+      
+      if (data.organization.subscription_plan === 'free') {
+        const remaining = data.organization.monthly_searches_limit - data.organization.monthly_searches_used;
+        setSearchesRemaining(remaining);
+      }
+
+      // Load role-based dashboard data
+      loadDashboardData();
+      // Load saved searches
+      loadSavedSearches();
+    } catch (error) {
+      console.error('Auth error:', error);
+      router.push('/login');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const loadDashboardData = async () => {
+    try {
+      const res = await fetch('/api/dashboard', { headers: getAuthHeaders() });
+      if (res.ok) {
+        const data = await res.json();
+        setDashData(data);
+      }
+    } catch {}
+  };
+
+  const loadSavedSearches = async () => {
+    try {
+      const res = await fetch('/api/saved-searches', { headers: getAuthHeaders() });
+      if (res.ok) {
+        const data = await res.json();
+        setSavedSearches(data.searches || []);
+      }
+    } catch {}
+  };
+
+  const handleSaveSearch = async () => {
+    if (!saveSearchName.trim() || !lastSearchParams) return;
+    try {
+      const res = await fetch('/api/saved-searches', {
+        method: 'POST',
+        headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: saveSearchName,
+          query_params: lastSearchParams,
+          result_count: results.length,
+        }),
+      });
+      if (res.ok) {
+        toast.success('Recherche sauvegardée !');
+        setShowSaveDialog(false);
+        setSaveSearchName('');
+        loadSavedSearches();
+      }
+    } catch {
+      toast.error('Erreur lors de la sauvegarde');
+    }
+  };
+
+  const handleRunSavedSearch = async (search: SavedSearch) => {
+    handleTextSearch(search.query_params);
+    toast.info(`Relance de "${search.name}"`);
+  };
+
+  const handleDeleteSavedSearch = async (id: string) => {
+    try {
+      await fetch(`/api/saved-searches?id=${id}`, {
+        method: 'DELETE',
+        headers: getAuthHeaders(),
+      });
+      setSavedSearches(prev => prev.filter(s => s.id !== id));
+      toast.success('Recherche supprimée');
+    } catch {}
+  };
+
+  const handleLogout = async () => {
+    await clientLogout();
+    router.push('/');
+  };
+
+  const isFree = org?.subscription_plan === 'free';
+  const isAdmin = user?.is_admin || false;
+
+  // Helper for relative time display
+  const timeAgo = (dateStr: string) => {
+    const diff = Date.now() - new Date(dateStr).getTime();
+    const mins = Math.floor(diff / 60000);
+    if (mins < 1) return "à l'instant";
+    if (mins < 60) return `il y a ${mins} min`;
+    const hours = Math.floor(mins / 60);
+    if (hours < 24) return `il y a ${hours}h`;
+    const days = Math.floor(hours / 24);
+    return `il y a ${days}j`;
+  };
+
+  const handleTextSearch = async (searchData: any) => {
+    setSearchLoading(true);
+    setShowUpgradePrompt(false);
+    setLastSearchParams(searchData);
+    setLastSearchWasText(true);
+
+    try {
+      const token = getToken();
+      if (!token) {
+        toast.error('Session expirée. Veuillez vous reconnecter.');
+        router.push('/login');
+        return;
+      }
+
+      const isMultipleAddresses = Array.isArray(searchData);
+
+      let searchBody: any;
+      if (isMultipleAddresses) {
+        searchBody = { adresses: searchData };
+      } else if (searchData.siren) {
+        searchBody = { siren: searchData.siren, departement: searchData.departement, limit: 10 };
+      } else if (searchData.denomination) {
+        searchBody = { denomination: searchData.denomination, departement: searchData.departement, limit: 200 };
+      } else {
+        searchBody = {
+          adresse: searchData.adresse,
+          code_postal: searchData.code_postal,
+          departement: searchData.departement,
+          limit: 200,
+        };
+      }
+
+      const response = await fetch('/api/cadastre/search', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...getAuthHeaders(),
+        },
+        body: JSON.stringify(searchBody),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        if (data.upgrade_required) {
+          setShowUpgradePrompt(true);
+          toast.error(data.error, { duration: 8000 });
+          return;
+        }
+        throw new Error(data.error || 'Erreur lors de la recherche');
+      }
+
+      if (data.success && data.resultats) {
+        setResults(data.resultats);
+        const count = data.total_proprietaires;
+        toast.success(`${count} propriétaire${count > 1 ? 's' : ''} trouvé${count > 1 ? 's' : ''} !`);
+        
+        if (data.searches_remaining !== undefined) {
+          setSearchesRemaining(data.searches_remaining);
+        }
+
+        if (data.upsell_message) {
+          setTimeout(() => {
+            toast(data.upsell_message, {
+              duration: 6000,
+              action: {
+                label: 'Passer au plan Pro',
+                onClick: () => router.push('/pricing'),
+              },
+            });
+          }, 2000);
+        }
+      } else {
+        toast.info('Aucun résultat trouvé');
+        setResults([]);
+      }
+    } catch (error: any) {
+      console.error('Search error:', error);
+      toast.error(error.message || 'Erreur lors de la recherche');
+    } finally {
+      setSearchLoading(false);
+    }
+  };
+
+  const handlePolygonCreated = async (coordinates: number[][]) => {
+    setDrawnPolygon(coordinates);
+    setSearchLoading(true);
+    setShowUpgradePrompt(false);
+    setLastSearchWasText(false);
+
+    try {
+      const token = getToken();
+      if (!token) {
+        toast.error('Session expirée. Veuillez vous reconnecter.');
+        router.push('/login');
+        return;
+      }
+
+      const response = await fetch('/api/cadastre/geographic', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...getAuthHeaders(),
+        },
+        body: JSON.stringify({
+          coordinates,
+          limit: 200,
+        }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        if (data.upgrade_required) {
+          setShowUpgradePrompt(true);
+          toast.error(data.error, { duration: 8000 });
+          return;
+        }
+        toast.error(data.error || 'Erreur lors de la recherche géographique');
+        setResults([]);
+        return;
+      }
+
+      if (data.success && data.resultats) {
+        setResults(data.resultats);
+        toast.success(`${data.total_proprietaires} propriétaire${data.total_proprietaires > 1 ? 's' : ''} trouvé${data.total_proprietaires > 1 ? 's' : ''} dans la zone !`);
+        
+        if (data.searches_remaining !== undefined) {
+          setSearchesRemaining(data.searches_remaining);
+        }
+        if (data.upsell_message) {
+          setTimeout(() => {
+            toast(data.upsell_message, {
+              duration: 6000,
+              action: {
+                label: 'Passer au plan Pro',
+                onClick: () => router.push('/pricing'),
+              },
+            });
+          }, 2000);
+        }
+      } else {
+        toast.info('Aucun résultat trouvé dans cette zone');
+        setResults([]);
+      }
+    } catch (error: any) {
+      console.error('Geographic search error:', error);
+      toast.error(error.message || 'Erreur inconnue');
+    } finally {
+      setSearchLoading(false);
+    }
+  };
+
+  const handleReveal = async (indices: number[]) => {
+    // Les données cadastrales sont déjà visibles — pas besoin de révéler
+    toast.info("Les données sont déjà visibles. Utilisez les boutons d'action sur chaque résultat pour envoyer un courrier ou l'ajouter à une liste.");
+  };
+
+
+
+
+  const handleExport = (format: 'csv' | 'excel' | 'json') => {
+    const dataToExport = selectedResults.size > 0
+      ? results.filter((_, idx) => selectedResults.has(idx))
+      : results;
+
+    if (dataToExport.length === 0) {
+      toast.error('Aucun résultat à exporter');
+      return;
+    }
+
+    if (format === 'csv' || format === 'excel') {
+      const sep = ';';
+      const headers = [
+        'Dénomination','SIREN','Forme juridique','Dirigeant',
+        'Adresse propriété','Code postal','Ville','Référence cadastrale',
+        'Type de bien','Surface parcelle','Surface Carrez','Prix/m²',
+        'Année construction','Copropriété','Nb lots total','Nb lots habitation',
+        'Nb lots tertiaire','Dernière transaction','Nb transactions'
+      ].join(sep);
+      const esc = (s: string) => `"${(s || '').replace(/"/g, '""')}"`;
+      
+      // Build one row per property (not per owner)
+      const csvRows: string[] = [];
+      dataToExport.forEach((r: any) => {
+        const dirigeants = r.entreprise?.dirigeants || [];
+        const dirigeant = dirigeants.length > 0 
+          ? dirigeants.map((d: any) => d.type === 'personne_physique' 
+            ? `${(d.prenoms||'').split(' ').map((p:string)=>p.charAt(0).toUpperCase()+p.slice(1).toLowerCase()).join(' ')} ${(d.nom||'').charAt(0).toUpperCase()+(d.nom||'').slice(1).toLowerCase()}`.trim()
+            : d.denomination || d.nom || ''
+          ).join(', ')
+          : r.proprietaire.dirigeant || '';
+        
+        const siren = r.entreprise?.siren || r.proprietaire.siren || '';
+        const denomination = r.proprietaire.denomination;
+        const formeJuridique = r.proprietaire.forme_juridique || '';
+        
+        const proprietes = r.proprietes && r.proprietes.length > 0 ? r.proprietes : [null];
+        
+        proprietes.forEach((prop: any) => {
+          const e = r.enrichissement || {};
+          csvRows.push([
+            esc(denomination),
+            siren,
+            esc(formeJuridique),
+            esc(dirigeant),
+            esc(prop?.adresse || ''),
+            prop?.code_postal || '',
+            esc(prop?.ville || ''),
+            prop?.reference_cadastrale || '',
+            esc(e.type_bien || ''),
+            e.surface_parcelle || '',
+            e.surface_batie || e.surface_carrez || '',
+            e.prix_m2 || '',
+            e.annee_construction || '',
+            e.est_copropriete === true ? 'Oui' : e.est_copropriete === false ? 'Non' : '',
+            e.nb_lots_total || '',
+            e.nb_lots_habitation || '',
+            e.nb_lots_tertiaire || '',
+            e.date_derniere_transaction || '',
+            e.nb_transactions || '',
+          ].join(sep));
+        });
+      });
+      const csvContent = csvRows.join('\n');
+
+      const bom = '\uFEFF';
+      const blob = new Blob([bom + headers + '\n' + csvContent], { type: 'text/csv;charset=utf-8' });
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `proprietaire-export-${new Date().toISOString().split('T')[0]}.csv`;
+      a.click();
+      window.URL.revokeObjectURL(url);
+      toast.success('Export CSV réussi !');
+    } else {
+      const jsonContent = JSON.stringify(dataToExport, null, 2);
+      const blob = new Blob([jsonContent], { type: 'application/json' });
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `proprietaire-export-${new Date().toISOString().split('T')[0]}.json`;
+      a.click();
+      window.URL.revokeObjectURL(url);
+      toast.success('Export JSON réussi !');
+    }
+  };
+
+  const handleMarkerClick = (index: number) => {
+    // Highlight the clicked result and scroll to it
+    setHighlightedIndex(index);
+    // Clear highlight after 3 seconds
+    setTimeout(() => setHighlightedIndex(undefined), 3000);
+    // Also toggle selection
+    const newSelection = new Set(selectedResults);
+    if (newSelection.has(index)) {
+      newSelection.delete(index);
+    } else {
+      newSelection.add(index);
+    }
+    setSelectedResults(newSelection);
+  };
+
+  const filteredResults = results.filter(result => {
+    if (!searchTerm) return true;
+    const term = searchTerm.toLowerCase();
+    return (
+      result.proprietaire.denomination.toLowerCase().includes(term) ||
+      result.proprietaire.adresse?.toLowerCase().includes(term) ||
+      result.proprietaire.ville?.toLowerCase().includes(term) ||
+      result.entreprise?.siren?.includes(term)
+    );
+  });
+
+  // Show onboarding wizard as full page if not completed
+  if (showOnboarding) {
+    return (
+      <div className="min-h-screen bg-gray-50 dark:bg-gray-900">
+        <OnboardingWizard onComplete={() => setShowOnboarding(false)} />
+      </div>
+    );
+  }
+
+  if (loading) {
+    return (
+      <div className="h-screen flex items-center justify-center bg-white dark:bg-gray-900">
+        <Loader2 className="h-8 w-8 animate-spin text-primary" />
+      </div>
+    );
+  }
+
+  const roleLevel = dashData?.role || 'agent';
+
+  return (
+    <div className="h-screen flex flex-col bg-white dark:bg-gray-900">
+      {/* Header */}
+      <header className="border-b bg-white dark:bg-gray-800 dark:border-gray-700 px-3 md:px-6 py-3">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <Link href="/" className="flex items-center gap-2">
+              <Building2 className="h-7 w-7 md:h-8 md:w-8 text-primary" />
+              <span className="text-xl md:text-2xl font-bold text-primary hidden sm:inline">Proprietaire.net</span>
+            </Link>
+            {/* Desktop nav links */}
+            <div className="ml-4 hidden lg:flex items-center gap-4">
+              <span className="text-sm text-muted-foreground">{user?.email}</span>
+              <Link href="/dashboard/courrier" className="text-sm text-blue-600 hover:underline dark:text-blue-400">📧 Courrier</Link>
+              <Link href="/dashboard/lists" className="text-sm text-blue-600 hover:underline dark:text-blue-400 flex items-center gap-1"><Star className="h-3 w-3" />Listes</Link>
+              <Link href="/dashboard/credits" className="text-sm text-blue-600 hover:underline dark:text-blue-400">💳 Crédits</Link>
+              {(roleLevel === 'owner' || roleLevel === 'admin') && (
+                <Link href="/dashboard/settings" className="text-sm text-blue-600 hover:underline dark:text-blue-400">⚙️ Paramètres</Link>
+              )}
+              {(roleLevel === 'owner' || roleLevel === 'admin' || roleLevel === 'manager') && (
+                <Link href="/dashboard/team" className="text-sm text-blue-600 hover:underline dark:text-blue-400">👥 Mon équipe</Link>
+              )}
+              {(roleLevel === 'owner' || roleLevel === 'admin') && (
+                <>
+                  <Link href="/dashboard/analytics" className="text-sm text-blue-600 hover:underline dark:text-blue-400">📊 Analytics</Link>
+                  <Link href="/dashboard/audit" className="text-sm text-blue-600 hover:underline dark:text-blue-400 flex items-center gap-1"><ScrollText className="h-3 w-3" />📝 Logs</Link>
+                </>
+              )}
+              {isAdmin && <Badge variant="destructive" className="ml-2 text-xs">Admin</Badge>}
+            </div>
+          </div>
+          <div className="flex items-center gap-1.5 md:gap-2">
+            {/* Credits - always visible */}
+            <Badge variant="secondary" className="px-2 md:px-3 py-1 md:py-1.5 cursor-pointer text-xs" onClick={() => router.push('/pricing')}>
+              <Coins className="mr-1 h-3 w-3" />
+              {isAdmin ? '∞' : (org?.credits_balance || 0)}
+            </Badge>
+
+            {/* Free plan indicator - hidden on very small screens */}
+            {isFree && searchesRemaining !== null && (
+              <Badge variant={searchesRemaining <= 3 ? 'destructive' : 'secondary'} className="hidden sm:flex px-2 md:px-3 py-1 md:py-1.5 text-xs">
+                <Search className="mr-1 h-3 w-3" />
+                {searchesRemaining}/{org?.monthly_searches_limit}
+              </Badge>
+            )}
+
+            {/* Buy credits button - hidden on mobile */}
+            <Link href="/dashboard/credits" className="hidden md:block">
+              <Button size="sm" variant="outline" className="border-amber-300 text-amber-700 hover:bg-amber-50">
+                <ShoppingCart className="mr-1 h-3 w-3" />
+                Acheter des crédits
+              </Button>
+            </Link>
+            {/* Upgrade button for free plan - hidden on mobile */}
+            {isFree && (
+              <Link href="/pricing" className="hidden md:block">
+                <Button size="sm" className="bg-gradient-to-r from-blue-600 to-green-600 hover:from-blue-700 hover:to-green-700">
+                  <Crown className="mr-1 h-3 w-3" />
+                  Passer Pro
+                </Button>
+              </Link>
+            )}
+
+          {/* Notification Bell */}
+          <NotificationBell />
+
+          {/* Theme Toggle */}
+
+          {isAdmin && (
+            <Link href="/admin" className="hidden md:block">
+              <Button variant="outline" size="sm" className="dark:border-gray-600 dark:text-gray-200">
+                <Settings className="mr-1 h-3 w-3" />
+                Admin
+              </Button>
+            </Link>
+          )}
+
+          <Button variant="ghost" size="sm" onClick={handleLogout} className="hidden md:flex dark:text-gray-300 dark:hover:bg-gray-700">
+            <LogOut className="h-4 w-4" />
+          </Button>
+
+          {/* Mobile burger menu */}
+          <button className="lg:hidden p-2 rounded-md hover:bg-gray-100 dark:hover:bg-gray-700" onClick={() => setDashMenuOpen(!dashMenuOpen)} aria-label="Menu">
+            {dashMenuOpen ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
+          </button>
+          </div>
+        </div>
+
+        {/* Mobile dropdown menu */}
+        {dashMenuOpen && (
+          <div className="lg:hidden border-t dark:border-gray-700 bg-white dark:bg-gray-800 animate-in slide-in-from-top duration-200">
+            <nav className="px-4 py-3 flex flex-col gap-1">
+              <span className="text-xs text-muted-foreground px-3 py-1 truncate">{user?.email}</span>
+              <Link href="/dashboard/courrier" className="text-sm text-blue-600 dark:text-blue-400 px-3 py-2 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700" onClick={() => setDashMenuOpen(false)}>📧 Courrier</Link>
+              <Link href="/dashboard/lists" className="text-sm text-blue-600 dark:text-blue-400 px-3 py-2 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 flex items-center gap-1" onClick={() => setDashMenuOpen(false)}><Star className="h-3 w-3" />📋 Listes</Link>
+              <Link href="/dashboard/credits" className="text-sm text-blue-600 dark:text-blue-400 px-3 py-2 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 flex items-center gap-1" onClick={() => setDashMenuOpen(false)}><ShoppingCart className="h-3 w-3" />💳 Crédits</Link>
+              {(roleLevel === 'owner' || roleLevel === 'admin') && (
+                <Link href="/dashboard/settings" className="text-sm text-blue-600 dark:text-blue-400 px-3 py-2 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700" onClick={() => setDashMenuOpen(false)}>⚙️ Paramètres</Link>
+              )}
+              {(roleLevel === 'owner' || roleLevel === 'admin' || roleLevel === 'manager') && (
+                <Link href="/dashboard/team" className="text-sm text-blue-600 dark:text-blue-400 px-3 py-2 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700" onClick={() => setDashMenuOpen(false)}>👥 Mon équipe</Link>
+              )}
+              {(roleLevel === 'owner' || roleLevel === 'admin') && (
+                <>
+                  <Link href="/dashboard/analytics" className="text-sm text-blue-600 dark:text-blue-400 px-3 py-2 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700" onClick={() => setDashMenuOpen(false)}>📊 Analytics</Link>
+                  <Link href="/dashboard/audit" className="text-sm text-blue-600 dark:text-blue-400 px-3 py-2 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 flex items-center gap-1" onClick={() => setDashMenuOpen(false)}><ScrollText className="h-3 w-3" />📝 Logs</Link>
+                </>
+              )}
+              {isAdmin && (
+                <Link href="/admin" className="text-sm text-blue-600 dark:text-blue-400 px-3 py-2 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 md:hidden" onClick={() => setDashMenuOpen(false)}>Admin</Link>
+              )}
+              <button onClick={() => { setDashMenuOpen(false); handleLogout(); }} className="text-sm text-red-600 dark:text-red-400 px-3 py-2 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 text-left flex items-center gap-1">
+                <LogOut className="h-3 w-3" />Déconnexion
+              </button>
+            </nav>
+          </div>
+        )}
+      </header>
+
+      {/* Role-based KPI bar */}
+      {dashData?.kpis && (
+        <div className="border-b bg-gray-50 dark:bg-gray-800/50 dark:border-gray-700 px-6 py-2">
+          <div className="flex items-center gap-6 text-sm">
+            {(roleLevel === 'owner' || roleLevel === 'admin') && (
+              <>
+                <span className="dark:text-gray-300"><strong className="text-blue-600 dark:text-blue-400">{dashData.kpis.team_members}</strong> membres</span>
+                <span className="dark:text-gray-300"><strong className="text-blue-600 dark:text-blue-400">{dashData.kpis.monthly_searches}</strong> recherches ce mois</span>
+                <span className="dark:text-gray-300"><strong className="text-green-600 dark:text-green-400">{dashData.kpis.total_courriers}</strong> courriers envoyés</span>
+                <span className="dark:text-gray-300"><strong className="text-amber-600 dark:text-amber-400">{dashData.kpis.credits_balance}</strong> crédits restants</span>
+              </>
+            )}
+            {roleLevel === 'manager' && (
+              <>
+                <span className="dark:text-gray-300"><strong className="text-blue-600 dark:text-blue-400">{dashData.kpis.monthly_searches}</strong> recherches ce mois</span>
+                <span className="dark:text-gray-300"><strong className="text-blue-600 dark:text-blue-400">{dashData.kpis.total_searches}</strong> recherches totales</span>
+              </>
+            )}
+            {roleLevel === 'agent' && (
+              <>
+                <span className="dark:text-gray-300"><strong className="text-blue-600 dark:text-blue-400">{dashData.kpis.my_searches}</strong> mes recherches</span>
+                <span className="dark:text-gray-300"><strong className="text-green-600 dark:text-green-400">{dashData.kpis.my_courriers}</strong> mes courriers</span>
+                <span className="dark:text-gray-300"><strong className="text-purple-600 dark:text-purple-400">{dashData.kpis.my_contacts}</strong> mes contacts</span>
+              </>
+            )}
+            {roleLevel === 'viewer' && (
+              <span className="dark:text-gray-300"><strong className="text-blue-600 dark:text-blue-400">{dashData.kpis.my_searches}</strong> / {dashData.kpis.searches_limit} recherches</span>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Upgrade prompt */}
+      {showUpgradePrompt && (
+        <div className="bg-gradient-to-r from-orange-500 to-red-500 text-white px-6 py-3 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="h-5 w-5" />
+            <span className="font-medium">Vous avez atteint votre limite de recherches gratuites ce mois-ci.</span>
+          </div>
+          <Link href="/pricing">
+            <Button size="sm" variant="secondary">
+              Passer au plan Starter — Recherches illimitées
+            </Button>
+          </Link>
+        </div>
+      )}
+
+      {/* Mobile toggle: Search / Map */}
+      <div className="md:hidden border-b dark:border-gray-700 bg-white dark:bg-gray-800 px-4 py-2 flex gap-2">
+        <Button
+          size="sm"
+          variant={!mobileShowMap ? 'default' : 'outline'}
+          className="flex-1 text-xs"
+          onClick={() => setMobileShowMap(false)}
+        >
+          <Search className="mr-1 h-3 w-3" />Recherche
+        </Button>
+        <Button
+          size="sm"
+          variant={mobileShowMap ? 'default' : 'outline'}
+          className="flex-1 text-xs"
+          onClick={() => setMobileShowMap(true)}
+        >
+          <Map className="mr-1 h-3 w-3" />Carte
+        </Button>
+      </div>
+
+      {/* Main content */}
+      <div className="flex-1 min-h-0 relative overflow-hidden">
+        {/* Left panel: Search */}
+        <div style={{ width: panelWidth + "px" }} className="hidden md:flex absolute top-0 bottom-0 left-0 z-20 flex-col overflow-x-hidden overflow-y-auto border-r dark:border-gray-700 bg-white dark:bg-gray-900 shadow-xl">
+
+          <div className="p-4 border-b bg-white dark:bg-gray-800 dark:border-gray-700">
+            <Tabs defaultValue="text" className="w-full">
+              <TabsList className="grid w-full grid-cols-3">
+                <TabsTrigger value="text">
+                  <Search className="mr-1.5 h-4 w-4" />
+                  Texte
+                </TabsTrigger>
+                <TabsTrigger value="map">
+                  <Map className="mr-1.5 h-4 w-4" />
+                  Carte
+                </TabsTrigger>
+                <TabsTrigger value="csv">
+                  <Upload className="mr-1.5 h-4 w-4" />
+                  Import CSV
+                </TabsTrigger>
+              </TabsList>
+
+              <TabsContent value="text" className="mt-4">
+                <TextSearchForm onSearch={handleTextSearch} loading={searchLoading} />
+                {/* Recent searches chips */}
+                {dashData?.recent_searches && dashData.recent_searches.length > 0 && (
+                  <div className="mt-3 space-y-1.5">
+                    <p className="text-xs text-muted-foreground font-medium">Recherches récentes</p>
+                    <div className="flex flex-wrap gap-1.5">
+                      {dashData.recent_searches.slice(0, 5).map((rs: any, i: number) => (
+                        <button
+                          key={rs.id || i}
+                          onClick={() => handleTextSearch(rs.query_params || rs.params || rs)}
+                          className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs bg-gray-100 dark:bg-gray-700 hover:bg-blue-100 dark:hover:bg-blue-900/40 text-gray-700 dark:text-gray-300 hover:text-blue-700 dark:hover:text-blue-300 transition-colors"
+                        >
+                          🔍 {rs.query_params?.adresse || rs.query_params?.denomination || rs.query_params?.siren || rs.params?.adresse || rs.params?.denomination || rs.label || 'Recherche'}
+                          {(rs.result_count !== undefined || rs.results_count !== undefined) && (
+                            <span className="text-muted-foreground">({rs.result_count ?? rs.results_count})</span>
+                          )}
+                          <span className="text-muted-foreground">— {timeAgo(rs.created_at || rs.searched_at || rs.last_run_at || new Date().toISOString())}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </TabsContent>
+
+              <TabsContent value="map" className="mt-4">
+                <Alert>
+                  <Info className="h-4 w-4" />
+                  <AlertDescription>
+                    Dessinez un polygone sur la carte (outils en haut à droite). La recherche démarre automatiquement.
+                  </AlertDescription>
+                </Alert>
+                {drawnPolygon && (
+                  <Card className="p-3 bg-blue-50 dark:bg-blue-900/30 border-blue-200 dark:border-blue-700 mt-3">
+                    <p className="text-sm font-medium text-blue-900 dark:text-blue-200">
+                      Zone sélectionnée ({drawnPolygon.length} points)
+                    </p>
+                  </Card>
+                )}
+              </TabsContent>
+
+              <TabsContent value="csv" className="mt-4">
+                <CsvUpload onSearch={handleTextSearch} loading={searchLoading} />
+              </TabsContent>
+            </Tabs>
+
+            {/* Saved Searches */}
+            {savedSearches.length > 0 && (
+              <div className="mt-3 border-t dark:border-gray-700 pt-3">
+                <p className="text-xs font-semibold text-gray-500 dark:text-gray-400 mb-2 flex items-center gap-1">
+                  <Bookmark className="h-3 w-3" /> Recherches sauvegardées
+                </p>
+                <div className="space-y-1 max-h-32 overflow-y-auto">
+                  {savedSearches.map(s => (
+                    <div key={s.id} className="flex items-center justify-between text-xs group">
+                      <button
+                        onClick={() => handleRunSavedSearch(s)}
+                        className="text-blue-600 dark:text-blue-400 hover:underline truncate flex-1 text-left"
+                      >
+                        {s.name} ({s.result_count} résultats)
+                      </button>
+                      <button
+                        onClick={() => handleDeleteSavedSearch(s.id)}
+                        className="text-red-400 hover:text-red-600 opacity-0 group-hover:opacity-100 ml-2"
+                      >
+                        ×
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Results panel */}
+          <div className="flex-1 flex flex-col overflow-hidden bg-gray-50 dark:bg-gray-900">
+            <div className="p-3 border-b bg-white dark:bg-gray-800 dark:border-gray-700 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <List className="h-4 w-4 text-muted-foreground" />
+
+                {searchLoading && (
+                  <Badge variant="secondary" className="text-xs">
+                    <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+                    Recherche...
+                  </Badge>
+                )}
+
+                {results.length > 0 && (
+                  <span className="text-xs text-muted-foreground">
+                    {filteredResults.length} résultat{filteredResults.length > 1 ? 's' : ''}
+                  </span>
+                )}
+              </div>
+
+              {/* Save search button */}
+              {results.length > 0 && lastSearchParams && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 text-xs"
+                  onClick={() => setShowSaveDialog(true)}
+                >
+                  <BookmarkPlus className="h-3 w-3 mr-1" />
+                  Sauvegarder
+                </Button>
+              )}
+            </div>
+
+            {/* Toolbar: Export dropdown + Courrier groupé */}
+            {results.length > 0 && (
+              <div className="px-3 py-1.5 border-b bg-white dark:bg-gray-800 dark:border-gray-700 flex items-center gap-2 flex-wrap">
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button variant="outline" size="sm" className="h-7 text-xs">
+                      <Download className="h-3 w-3 mr-1" />Exporter ({filteredResults.length})
+                      <ChevronDown className="h-3 w-3 ml-1" />
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="start">
+                    <DropdownMenuItem onClick={() => handleExport('csv')}>
+                      📄 CSV (Excel FR)
+                    </DropdownMenuItem>
+                    <DropdownMenuItem onClick={() => handleExport('excel')}>
+                      📊 Excel
+                    </DropdownMenuItem>
+                    <DropdownMenuItem onClick={() => handleExport('json')}>
+                      🔧 JSON
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+                {selectedResults.size > 0 && (
+                  <Button size="sm" className="h-7 text-xs" onClick={() => {
+                    const selected = results.filter((_, idx) => selectedResults.has(idx));
+                    const withDirigeant = selected.filter((r: any) => {
+                      const dirigeants = r.entreprise?.dirigeants || [];
+                      return dirigeants.length > 0 && dirigeants.some((d: any) => d.type === 'personne_physique' && (d.nom || d.prenoms));
+                    });
+                    if (withDirigeant.length === 0) {
+                      toast.error('Aucun résultat avec nom de dirigeant trouvé.');
+                      return;
+                    }
+                    if (withDirigeant.length < selected.length) {
+                      toast.warning(`${selected.length - withDirigeant.length} résultat(s) sans dirigeant exclus.`);
+                    }
+                    sessionStorage.setItem('bulk_courrier_results', JSON.stringify(withDirigeant));
+                    const ids = withDirigeant.map(r => r.id).filter(Boolean).join(',');
+                    router.push(`/dashboard/courrier?bulk=true&count=${withDirigeant.length}&ids=${ids}`);
+                  }}>
+                    <Mail className="h-3 w-3 mr-1" />Courrier groupé ({selectedResults.size})
+                  </Button>
+                )}
+              </div>
+            )}
+
+            {results.length > 0 && (
+              <div className="px-3 py-2 border-b bg-white dark:bg-gray-800 dark:border-gray-700">
+                <Input
+                  placeholder="Filtrer les résultats..."
+                  value={searchTerm}
+                  onChange={(e) => setSearchTerm(e.target.value)}
+                  className="h-8 text-sm dark:bg-gray-700 dark:border-gray-600"
+                />
+              </div>
+            )}
+
+            <div className="flex-1 overflow-auto p-3">
+              <ResultsList
+                results={filteredResults}
+                onExport={() => handleExport('csv')}
+                onReveal={handleReveal}
+                onCreditsUpdate={checkUser}
+                selectedResults={selectedResults}
+                onSelectionChange={setSelectedResults}
+                highlightedIndex={highlightedIndex}
+              />
+            </div>
+          </div>
+        </div>
+
+        {/* Mobile panel: Search (shown when mobileShowMap is false) */}
+        <div className={`md:hidden absolute top-0 bottom-0 left-0 right-0 z-20 flex flex-col overflow-x-hidden overflow-y-auto bg-white dark:bg-gray-900 ${mobileShowMap ? 'hidden' : ''}`}>
+          <div className="p-4 border-b bg-white dark:bg-gray-800 dark:border-gray-700">
+            <Tabs defaultValue="text" className="w-full">
+              <TabsList className="grid w-full grid-cols-3">
+                <TabsTrigger value="text">
+                  <Search className="mr-1.5 h-4 w-4" />
+                  Texte
+                </TabsTrigger>
+                <TabsTrigger value="map">
+                  <Map className="mr-1.5 h-4 w-4" />
+                  Carte
+                </TabsTrigger>
+                <TabsTrigger value="csv">
+                  <Upload className="mr-1.5 h-4 w-4" />
+                  CSV
+                </TabsTrigger>
+              </TabsList>
+
+              <TabsContent value="text" className="mt-4">
+                <TextSearchForm onSearch={handleTextSearch} loading={searchLoading} />
+                {/* Recent searches chips - mobile */}
+                {dashData?.recent_searches && dashData.recent_searches.length > 0 && (
+                  <div className="mt-3 space-y-1.5">
+                    <p className="text-xs text-muted-foreground font-medium">Recherches récentes</p>
+                    <div className="flex flex-wrap gap-1.5">
+                      {dashData.recent_searches.slice(0, 5).map((rs: any, i: number) => (
+                        <button
+                          key={rs.id || i}
+                          onClick={() => handleTextSearch(rs.query_params || rs.params || rs)}
+                          className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs bg-gray-100 dark:bg-gray-700 hover:bg-blue-100 dark:hover:bg-blue-900/40 text-gray-700 dark:text-gray-300 hover:text-blue-700 dark:hover:text-blue-300 transition-colors"
+                        >
+                          🔍 {rs.query_params?.adresse || rs.query_params?.denomination || rs.query_params?.siren || rs.params?.adresse || rs.params?.denomination || rs.label || 'Recherche'}
+                          {(rs.result_count !== undefined || rs.results_count !== undefined) && (
+                            <span className="text-muted-foreground">({rs.result_count ?? rs.results_count})</span>
+                          )}
+                          <span className="text-muted-foreground">— {timeAgo(rs.created_at || rs.searched_at || rs.last_run_at || new Date().toISOString())}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </TabsContent>
+
+              <TabsContent value="map" className="mt-4">
+                <Alert>
+                  <Info className="h-4 w-4" />
+                  <AlertDescription>
+                    Passez en vue Carte pour dessiner un polygone.
+                  </AlertDescription>
+                </Alert>
+              </TabsContent>
+
+              <TabsContent value="csv" className="mt-4">
+                <CsvUpload onSearch={handleTextSearch} loading={searchLoading} />
+              </TabsContent>
+            </Tabs>
+          </div>
+
+          {/* Mobile results */}
+          <div className="flex-1 flex flex-col overflow-hidden bg-gray-50 dark:bg-gray-900">
+            <div className="p-3 border-b bg-white dark:bg-gray-800 dark:border-gray-700 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <List className="h-4 w-4 text-muted-foreground" />
+                {searchLoading && (
+                  <Badge variant="secondary" className="text-xs">
+                    <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+                    Recherche...
+                  </Badge>
+                )}
+                {results.length > 0 && (
+                  <span className="text-xs text-muted-foreground">
+                    {filteredResults.length} résultat{filteredResults.length > 1 ? 's' : ''}
+                  </span>
+                )}
+              </div>
+            </div>
+
+            {results.length > 0 && (
+              <div className="px-3 py-1.5 border-b bg-white dark:bg-gray-800 dark:border-gray-700 flex items-center gap-2 flex-wrap">
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button variant="outline" size="sm" className="h-7 text-xs">
+                      <Download className="h-3 w-3 mr-1" />Exporter ({filteredResults.length})
+                      <ChevronDown className="h-3 w-3 ml-1" />
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="start">
+                    <DropdownMenuItem onClick={() => handleExport('csv')}>
+                      📄 CSV (Excel FR)
+                    </DropdownMenuItem>
+                    <DropdownMenuItem onClick={() => handleExport('excel')}>
+                      📊 Excel
+                    </DropdownMenuItem>
+                    <DropdownMenuItem onClick={() => handleExport('json')}>
+                      🔧 JSON
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+                {selectedResults.size > 0 && (
+                  <Button size="sm" className="h-7 text-xs" onClick={() => {
+                    const selected = results.filter((_, idx) => selectedResults.has(idx));
+                    const withDirigeant = selected.filter((r: any) => {
+                      const dirigeants = r.entreprise?.dirigeants || [];
+                      return dirigeants.length > 0 && dirigeants.some((d: any) => d.type === 'personne_physique' && (d.nom || d.prenoms));
+                    });
+                    if (withDirigeant.length === 0) {
+                      toast.error('Aucun résultat avec nom de dirigeant trouvé.');
+                      return;
+                    }
+                    if (withDirigeant.length < selected.length) {
+                      toast.warning(`${selected.length - withDirigeant.length} résultat(s) sans dirigeant exclus.`);
+                    }
+                    sessionStorage.setItem('bulk_courrier_results', JSON.stringify(withDirigeant));
+                    const ids = withDirigeant.map(r => r.id).filter(Boolean).join(',');
+                    router.push(`/dashboard/courrier?bulk=true&count=${withDirigeant.length}&ids=${ids}`);
+                  }}>
+                    <Mail className="h-3 w-3 mr-1" />Courrier groupé ({selectedResults.size})
+                  </Button>
+                )}
+              </div>
+            )}
+
+            {results.length > 0 && (
+              <div className="px-3 py-2 border-b bg-white dark:bg-gray-800 dark:border-gray-700">
+                <Input
+                  placeholder="Filtrer les résultats..."
+                  value={searchTerm}
+                  onChange={(e) => setSearchTerm(e.target.value)}
+                  className="h-8 text-sm dark:bg-gray-700 dark:border-gray-600"
+                />
+              </div>
+            )}
+
+            <div className="flex-1 overflow-auto p-3">
+              <ResultsList
+                results={filteredResults}
+                onExport={() => handleExport('csv')}
+                onReveal={handleReveal}
+                onCreditsUpdate={checkUser}
+                selectedResults={selectedResults}
+                onSelectionChange={setSelectedResults}
+                highlightedIndex={highlightedIndex}
+              />
+            </div>
+          </div>
+        </div>
+
+        {/* Resize Handle - desktop only */}
+        <div
+          onMouseDown={handleMouseDown}
+          style={{ left: panelWidth + "px", position: "absolute", top: 0, bottom: 0, zIndex: 30 }} className="hidden md:block w-1.5 hover:w-2 bg-gray-200 hover:bg-blue-400 cursor-col-resize transition-all duration-150 z-30 group"
+          title="Glisser pour redimensionner"
+        >
+          <div className="absolute inset-y-0 -left-1 -right-1" />
+          <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-1 h-8 rounded-full bg-gray-400 group-hover:bg-blue-500 transition-colors" />
+        </div>
+        {/* Right panel: Map - on mobile shown when mobileShowMap is true */}
+        <div style={{ position: "absolute", top: 0, bottom: 0, left: 0, right: 0, zIndex: 10 }} className={`bg-white dark:bg-gray-800 h-full w-full ${!mobileShowMap ? 'hidden md:block' : ''}`}>
+          <MapComponent
+            onPolygonCreated={handlePolygonCreated}
+            results={filteredResults}
+            selectedResults={selectedResults}
+            onMarkerClick={handleMarkerClick}
+            autoFitBounds={lastSearchWasText}
+          />
+        </div>
+      </div>
+
+
+      {/* Save Search Dialog */}
+      <Dialog open={showSaveDialog} onOpenChange={setShowSaveDialog}>
+        <DialogContent className="dark:bg-gray-800 dark:border-gray-700">
+          <DialogHeader>
+            <DialogTitle className="dark:text-white">💾 Sauvegarder cette recherche</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div>
+              <Label className="dark:text-gray-300">Nom de la recherche</Label>
+              <Input
+                value={saveSearchName}
+                onChange={(e) => setSaveSearchName(e.target.value)}
+                placeholder="Ex: Propriétaires Lyon 3ème"
+                className="mt-1 dark:bg-gray-700 dark:border-gray-600"
+              />
+            </div>
+            <div className="flex justify-end gap-2">
+              <Button variant="outline" onClick={() => setShowSaveDialog(false)} className="dark:border-gray-600 dark:text-gray-300">
+                Annuler
+              </Button>
+              <Button onClick={handleSaveSearch} disabled={!saveSearchName.trim()}>
+                Sauvegarder
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}
