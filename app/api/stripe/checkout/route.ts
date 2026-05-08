@@ -79,7 +79,7 @@ export async function POST(req: NextRequest) {
               name: `${pack.credits.toLocaleString('fr-FR')} crédits courrier`,
               description: `Pack ${pack.name} — Proprietaire.net`,
             },
-            unit_amount: pack.price_cents,
+            unit_amount: (parseInt(pack.price) * 100),
             tax_behavior: "inclusive" as const,
           },
           quantity: 1,
