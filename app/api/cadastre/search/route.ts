@@ -10,7 +10,7 @@ const CADASTRE_API_KEY = process.env.CADASTRE_API_KEY || '';
 
 function buildParcelleId(propriete: any): string | null {
   // Construire l'IDU 14 chars : dept(2) + commune(3) + prefix(3) + section(2) + numero(4)
-  const dept = (propriete.departement || '').trim().padStart(2, '0');
+  const dept = (propriete.departement || "").trim().padStart(2, "0");
   const commune = (propriete.code_commune || '').trim().padStart(3, '0');
   const prefix = (propriete.prefixe || '000').trim().padStart(3, '0');
   const section = (propriete.section || '').trim().padStart(2, '0');

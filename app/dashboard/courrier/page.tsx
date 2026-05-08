@@ -111,6 +111,9 @@ function loadRecipientsFromStorage(): Recipient[] {
       sessionStorage.removeItem('bulk_courrier_results');
       // Convert CadastreResult[] to Recipient[]
       return results.map((r: any) => {
+        const prop = r.proprietes?.[0] || {};
+        const adresse = cleanAddress(prop.adresse || "");
+        const ville = cleanCity(prop.ville || "");
         const dirigeants = r.entreprise?.dirigeants || [];
         const d = dirigeants[0];
         const prenom = d?.type === 'personne_physique' ? (d.prenoms || '').split(' ')[0] : '';
@@ -119,14 +122,14 @@ function loadRecipientsFromStorage(): Recipient[] {
           prenom,
           nom,
           nom_societe: r.proprietaire?.denomination || '',
-          adresse_ligne1: r.proprietaire?.adresse || r.proprietes?.[0]?.adresse || '',
+          adresse_ligne1: adresse,
           adresse_ligne2: '',
-          code_postal: r.proprietaire?.code_postal || r.proprietes?.[0]?.code_postal || '',
-          ville: r.proprietaire?.ville || r.proprietes?.[0]?.ville || '',
+          code_postal: prop.code_postal || '',
+          ville: ville,
           pays: 'France',
-          bien_adresse: r.proprietes?.[0]?.adresse || '',
-          bien_cp: r.proprietes?.[0]?.code_postal || '',
-          bien_ville: r.proprietes?.[0]?.ville || '',
+          bien_adresse: adresse,
+          bien_cp: prop.code_postal || '',
+          bien_ville: ville,
         };
       });
     }
