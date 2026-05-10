@@ -27,7 +27,7 @@ export async function POST(req: NextRequest) {
     if (!auth.user.is_admin) return NextResponse.json({ error: "Accès refusé" }, { status: 403 });
 
     const body = await req.json();
-    const { name, slug, description, price_ht, monthly_searches_limit, included_users, extra_user_price, features } = body;
+    const { name, slug, description, price, monthly_searches_limit, included_users, extra_user_price, features } = body;
 
     if (!name || !slug) return NextResponse.json({ error: "Nom et slug requis" }, { status: 400 });
 
@@ -35,7 +35,7 @@ export async function POST(req: NextRequest) {
     let stripePriceId = null;
 
     // Create Stripe product and price if paid plan
-    if (price_ht > 0) {
+    if (price > 0) {
       const product = await stripe.products.create({
         name,
         description: description || undefined,
@@ -45,7 +45,7 @@ export async function POST(req: NextRequest) {
 
       const price = await stripe.prices.create({
         product: product.id,
-        unit_amount: price_ht,
+        unit_amount: price,
         currency: "eur",
         recurring: { interval: "month" },
         tax_behavior: "exclusive",
@@ -57,9 +57,9 @@ export async function POST(req: NextRequest) {
     const sortOrder = maxSort.rows[0].next_sort;
 
     const result = await query(
-      `INSERT INTO plans (name, slug, description, price_ht, monthly_searches_limit, included_users, extra_user_price, stripe_product_id, stripe_price_id, features, sort_order)
+      `INSERT INTO plans (name, slug, description, price, monthly_searches_limit, included_users, extra_user_price, stripe_product_id, stripe_price_id, features, sort_order)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11) RETURNING *`,
-      [name, slug, description, price_ht || 0, monthly_searches_limit || 10, included_users || 1, extra_user_price || 0, stripeProductId, stripePriceId, JSON.stringify(features || []), sortOrder]
+      [name, slug, description, price || 0, monthly_searches_limit || 10, included_users || 1, extra_user_price || 0, stripeProductId, stripePriceId, JSON.stringify(features || []), sortOrder]
     );
 
     return NextResponse.json({ plan: result.rows[0] }, { status: 201 });

@@ -20,17 +20,17 @@ export async function GET(req: NextRequest) {
 
     // === FINANCIAL KPIs ===
     const mrrQuery = `
-      SELECT COALESCE(sum(p.price_ht), 0) as current_mrr
+      SELECT COALESCE(sum(p.price), 0) as current_mrr
       FROM organizations o 
       JOIN plans p ON p.slug = o.subscription_plan 
-      WHERE o.subscription_plan != 'free' AND p.price_ht > 0
+      WHERE o.subscription_plan != 'free' AND p.price > 0
     `;
     
     const previousMrrQuery = `
-      SELECT COALESCE(sum(p.price_ht), 0) as previous_mrr
+      SELECT COALESCE(sum(p.price), 0) as previous_mrr
       FROM organizations o 
       JOIN plans p ON p.slug = o.subscription_plan 
-      WHERE o.subscription_plan != 'free' AND p.price_ht > 0
+      WHERE o.subscription_plan != 'free' AND p.price > 0
       AND o.subscription_started_at < $1
     `;
 
@@ -46,7 +46,7 @@ export async function GET(req: NextRequest) {
         FROM organizations o
         JOIN plans p ON p.slug = o.subscription_plan
         WHERE o.subscription_started_at < $1
-        AND p.price_ht > 0
+        AND p.price > 0
       ),
       churned_orgs AS (
         SELECT count(*) as count
@@ -263,11 +263,11 @@ export async function GET(req: NextRequest) {
       query(`
         SELECT 
           date_trunc('month', o.subscription_started_at)::date as month,
-          COALESCE(sum(p.price_ht), 0)/100 as mrr
+          COALESCE(sum(p.price), 0)/100 as mrr
         FROM organizations o
         JOIN plans p ON p.slug = o.subscription_plan
         WHERE o.subscription_started_at >= $1
-        AND p.price_ht > 0
+        AND p.price > 0
         GROUP BY month
         ORDER BY month
       `, [new Date(now.getFullYear() - 1, now.getMonth(), 1).toISOString()]),
@@ -287,14 +287,14 @@ export async function GET(req: NextRequest) {
       query(`
         SELECT 
           o.id, o.name, o.subscription_plan, o.credits_balance,
-          p.price_ht/100 as individual_mrr,
+          p.price/100 as individual_mrr,
           max(sh.created_at) as last_activity,
           count(u.id) as user_count
         FROM organizations o
         LEFT JOIN users u ON u.organization_id = o.id
         LEFT JOIN search_history sh ON sh.organization_id = o.id
         LEFT JOIN plans p ON p.slug = o.subscription_plan
-        GROUP BY o.id, o.name, o.subscription_plan, o.credits_balance, p.price_ht
+        GROUP BY o.id, o.name, o.subscription_plan, o.credits_balance, p.price
         ORDER BY individual_mrr DESC NULLS LAST, o.credits_balance DESC
         LIMIT 10
       `),
