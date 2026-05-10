@@ -1,7 +1,7 @@
 'use client';
 
-import { useState, useMemo } from 'react';
-import { useRouter } from 'next/navigation';
+import { useState, useMemo, useEffect } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -10,7 +10,7 @@ import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle }
 import { toast } from 'sonner';
 import { Building2, Loader2, Gift, Check, X } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
-import { register } from '@/lib/auth-client';
+import { register, getAuthHeaders } from '@/lib/auth-client';
 
 function validatePassword(password: string) {
   return {
@@ -27,12 +27,33 @@ function isPasswordValid(password: string) {
 
 export default function RegisterPage() {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const selectedPlan = searchParams.get('plan');
+  const selectedPeriod = searchParams.get('period') || 'monthly';
+  
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [firstName, setFirstName] = useState('');
   const [lastName, setLastName] = useState('');
   const [loading, setLoading] = useState(false);
+  const [planInfo, setPlanInfo] = useState<{ name: string; price: number } | null>(null);
+
+  // Fetch plan info if a plan is selected
+  useEffect(() => {
+    if (selectedPlan && selectedPlan !== 'gratuit') {
+      fetch('/api/plans')
+        .then(r => r.json())
+        .then(data => {
+          const plan = data.plans?.find((p: any) => p.slug === selectedPlan);
+          if (plan) {
+            const price = selectedPeriod === 'annual' ? Math.round(plan.price_euros * 0.8) : plan.price_euros;
+            setPlanInfo({ name: plan.name, price });
+          }
+        })
+        .catch(() => {});
+    }
+  }, [selectedPlan, selectedPeriod]);
 
   const passwordChecks = useMemo(() => validatePassword(password), [password]);
   const passwordTouched = password.length > 0;
@@ -55,7 +76,29 @@ export default function RegisterPage() {
     try {
       await register(email, password, firstName, lastName);
       toast.success('Compte créé ! Vous recevez 10 crédits gratuits 🎉');
-      router.push('/dashboard');
+      
+      // If a paid plan is selected, redirect to Stripe checkout
+      if (selectedPlan && selectedPlan !== 'gratuit') {
+        const headers = getAuthHeaders();
+        const response = await fetch('/api/stripe/checkout', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...headers },
+          body: JSON.stringify({
+            type: 'subscription',
+            plan_slug: selectedPlan,
+            billing_period: selectedPeriod,
+          }),
+        });
+        const data = await response.json();
+        if (response.ok && data.url) {
+          window.location.href = data.url;
+        } else {
+          toast.error(data.error || 'Erreur lors de la souscription');
+          router.push('/dashboard');
+        }
+      } else {
+        router.push('/dashboard');
+      }
     } catch (error: any) {
       toast.error(error.message || 'Erreur lors de l\'inscription');
     } finally {
@@ -72,10 +115,16 @@ export default function RegisterPage() {
           </Link>
           <CardTitle className="text-2xl text-center">Créer un compte</CardTitle>
           <CardDescription className="text-center">
-            <Badge variant="secondary" className="mt-2">
-              <Gift className="h-3 w-3 mr-1" />
-              10 crédits offerts + 10 recherches/mois gratuites
-            </Badge>
+            {selectedPlan && selectedPlan !== 'gratuit' && planInfo ? (
+              <Badge variant="default" className="mt-2 bg-blue-600">
+                Plan {planInfo.name} — {planInfo.price}€{selectedPeriod === 'annual' ? '/mois (annuel)' : '/mois'}
+              </Badge>
+            ) : (
+              <Badge variant="secondary" className="mt-2">
+                <Gift className="h-3 w-3 mr-1" />
+                10 crédits offerts + 10 recherches/mois gratuites
+              </Badge>
+            )}
           </CardDescription>
         </CardHeader>
         <form onSubmit={handleRegister}>

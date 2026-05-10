@@ -55,30 +55,19 @@ function getDiscountLabel(credits: number): string {
 // Feature mapping per plan slug
 const FEATURE_MAP: Record<string, { text: string; included: boolean }[]> = {
   gratuit: [
-    { text: '10 recherches par mois', included: true }, { text: 'Recherche par adresse', included: true },
-    { text: 'Recherche par zone sur carte', included: true }, { text: 'Export CSV basique', included: true },
-    { text: 'CRM intégré', included: false }, { text: 'Templates courrier + IA', included: false },
-    { text: 'Envoi courriers postaux', included: false }, { text: 'Multi-utilisateurs', included: false },
-  ],
-  starter: [
-    { text: '100 recherches par mois', included: true }, { text: 'Recherche par adresse et zone', included: true },
-    { text: 'CRM intégré', included: true }, { text: 'Templates courrier + IA', included: true },
-    { text: 'Envoi courriers postaux', included: true }, { text: 'Listes et favoris', included: true },
-    { text: 'Multi-utilisateurs (+20€/user)', included: true }, { text: 'Support prioritaire', included: false },
+    { text: '10 résultats de recherche par mois', included: true }, { text: 'Comptabilisés uniquement si résultats', included: true },
+    { text: 'Recherche par adresse', included: true }, { text: 'Recherche par zone sur carte', included: true },
+    { text: 'Export CSV basique', included: true }, { text: 'CRM intégré', included: false },
+    { text: 'Templates courrier + IA', included: false }, { text: 'Envoi courriers postaux', included: false },
+    { text: 'Multi-utilisateurs', included: false },
   ],
   pro: [
-    { text: 'Recherches illimitées', included: true }, { text: 'Recherche par adresse et zone', included: true },
-    { text: 'CRM intégré complet', included: true }, { text: 'Templates courrier + IA', included: true },
-    { text: 'Envoi courriers postaux', included: true }, { text: 'Listes et favoris', included: true },
-    { text: 'Multi-utilisateurs (+20€/user)', included: true }, { text: 'Dashboard analytique', included: true },
-    { text: 'Export tous formats', included: true }, { text: 'Support prioritaire', included: true },
-  ],
-  enterprise: [
-    { text: 'Recherches illimitées', included: true }, { text: 'Recherche par adresse et zone', included: true },
-    { text: 'CRM intégré complet', included: true }, { text: 'Templates courrier + IA', included: true },
-    { text: 'Envoi courriers postaux', included: true }, { text: 'Listes et favoris', included: true },
-    { text: 'Multi-utilisateurs inclus', included: true }, { text: 'Dashboard analytique avancé', included: true },
-    { text: 'Export tous formats', included: true }, { text: 'Support dédié', included: true },
+    { text: 'Recherches illimitées', included: true }, { text: 'Max 200 résultats par recherche', included: true },
+    { text: 'Recherche par adresse et zone', included: true }, { text: 'CRM intégré complet', included: true },
+    { text: 'Templates courrier + IA', included: true }, { text: 'Envoi courriers postaux', included: true },
+    { text: 'Listes et favoris', included: true }, { text: 'Multi-utilisateurs (+20€/user)', included: true },
+    { text: 'Dashboard analytique', included: true }, { text: 'Export tous formats', included: true },
+    { text: 'Support prioritaire', included: true },
   ],
 };
 
@@ -109,11 +98,39 @@ export default function PricingPage() {
     router.push(`/dashboard/credits?amount=${credits}`);
   };
 
-  const handleSubscribe = (slug: string) => {
+  const handleSubscribe = async (slug: string) => {
+    if (slug === 'gratuit') {
+      router.push(isLoggedIn ? '/dashboard' : '/register?plan=gratuit');
+      return;
+    }
+    
     if (isLoggedIn) {
-      router.push(`/dashboard/settings?plan=${slug}&period=${billingPeriod}`);
+      // Utilisateur connecté → appel direct au checkout Stripe
+      try {
+        const headers = getAuthHeaders();
+        const response = await fetch('/api/stripe/checkout', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...headers },
+          body: JSON.stringify({
+            type: 'subscription',
+            plan_slug: slug,
+            billing_period: billingPeriod,
+          }),
+        });
+        const data = await response.json();
+        if (!response.ok) {
+          toast.error(data.error || 'Erreur lors de la souscription');
+          return;
+        }
+        if (data.url) {
+          window.location.href = data.url;
+        }
+      } catch {
+        toast.error('Erreur de connexion');
+      }
     } else {
-      router.push(`/register?plan=${slug}`);
+      // Utilisateur non connecté → redirection vers inscription avec plan et period
+      router.push(`/register?plan=${slug}&period=${billingPeriod}`);
     }
   };
 
@@ -189,7 +206,10 @@ export default function PricingPage() {
                       <span className="text-gray-600 ml-1">{plan.price_euros > 0 ? '/mois HT' : ''}</span>
                     </div>
                     {billingPeriod === 'annual' && plan.price_euros > 0 && (
-                      <p className="text-sm text-green-600 mt-1">Au lieu de {plan.price_euros}€/mois (-20%)</p>
+                      <div className="mt-1">
+                        <p className="text-sm text-green-600">Au lieu de {plan.price_euros}€/mois (-20%)</p>
+                        <p className="text-xs text-gray-500">Facturé {Math.round(plan.price_euros * 0.8 * 12)}€ en une fois</p>
+                      </div>
                     )}
                     <p className="text-xs text-gray-500 mt-2">{plan.included_users} utilisateur inclus · {searchLimit}</p>
                   </CardHeader>
@@ -356,7 +376,7 @@ export default function PricingPage() {
               { q: 'La recherche est-elle vraiment gratuite ?', a: 'Oui. Le plan Gratuit offre 10 recherches par mois. Le plan Pro offre des recherches illimitées.' },
               { q: 'Que sont les crédits ?', a: 'Les crédits servent uniquement à envoyer des courriers postaux. 100 crédits = 1€. Une lettre verte coûte 410 crédits (4,10€), tout inclus.' },
               { q: 'Y a-t-il des réductions sur les crédits ?', a: 'Oui. À partir de 60 000 crédits (600€), vous bénéficiez de -10%. À partir de 200 000 crédits, c\'est -15% avec le Megapack.' },
-              { q: 'Comment fonctionne le paiement annuel ?', a: 'Le paiement annuel offre 20% de réduction sur l\'abonnement uniquement. Vous payez pour 12 mois en une fois.' },
+              { q: 'Comment fonctionne le paiement annuel ?', a: 'Le paiement annuel offre 20% de réduction. Le montant total est facturé en une seule fois chaque année (exemple : 931€ au lieu de 1 164€ pour le plan Pro).' },
               { q: 'Les crédits expirent-ils ?', a: 'Non. Vos crédits n\'expirent jamais. Utilisez-les quand vous le souhaitez.' },
               { q: 'Puis-je acheter un montant personnalisé ?', a: 'Oui. Choisissez le nombre exact de crédits dont vous avez besoin, par tranches de 1 000.' },
             ].map((faq, i) => (<Card key={i}><CardHeader className="pb-3"><CardTitle className="text-base">{faq.q}</CardTitle></CardHeader><CardContent><p className="text-sm text-muted-foreground">{faq.a}</p></CardContent></Card>))}
