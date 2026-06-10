@@ -1,4 +1,8 @@
-// In-memory rate limiter using Map with IP + timestamp
+// Rate limiter en memoire (Map) base sur IP + timestamp.
+// ATTENTION: ce store est local au process et NON distribue. En deploiement
+// multi-instance (scaling horizontal, serverless), chaque instance possede
+// son propre compteur, donc la limite globale n'est pas garantie. Pour une
+// limitation fiable a l'echelle, migrer vers un store partage (ex: Redis).
 interface RateLimitEntry {
   count: number;
   resetAt: number;
@@ -28,12 +32,29 @@ export const RATE_LIMITS: Record<string, RateLimitConfig> = {
 };
 
 export function getClientIP(req: Request): string {
-  const forwarded = req.headers.get('x-forwarded-for');
-  if (forwarded) {
-    return forwarded.split(',')[0].trim();
+  // Les headers X-Forwarded-For / X-Real-IP sont spoofables par le client.
+  // On ne leur fait confiance QUE si l'app tourne derriere un proxy de confiance
+  // (variable d'env TRUST_PROXY definie). Dans ce cas, le premier hop est l'IP
+  // cliente reelle injectee par notre proxy. Sinon on retombe sur l'IP de
+  // connexion exposee par le runtime (request.ip, dispo sur NextRequest).
+  const trustProxy = Boolean(process.env.TRUST_PROXY);
+
+  if (trustProxy) {
+    const forwarded = req.headers.get('x-forwarded-for');
+    if (forwarded) {
+      return forwarded.split(',')[0].trim();
+    }
+    const realIP = req.headers.get('x-real-ip');
+    if (realIP) return realIP;
   }
-  const realIP = req.headers.get('x-real-ip');
-  if (realIP) return realIP;
+
+  // IP de connexion fournie par le runtime (non spoofable par les headers).
+  // Request standard ne type pas `ip`, mais NextRequest l'expose: narrowing sur unknown.
+  const maybeIp = (req as unknown as { ip?: unknown }).ip;
+  if (typeof maybeIp === 'string' && maybeIp.length > 0) {
+    return maybeIp;
+  }
+
   return 'unknown';
 }
 

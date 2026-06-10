@@ -56,8 +56,8 @@ Créer un fichier `.env` avec :
 NEXT_PUBLIC_SUPABASE_URL=votre_url_supabase
 NEXT_PUBLIC_SUPABASE_ANON_KEY=votre_anon_key
 
-CADASTRE_API_URL=http://84.247.175.132:3013
-CADASTRE_API_KEY=cadastre_master_key_2025_secure
+CADASTRE_API_URL=https://votre-backend-cadastre
+CADASTRE_API_KEY=votre_cle_api_cadastre
 
 # FullEnrich API - Optionnel, peut être configuré via Admin Dashboard
 # Get your API key from https://app.fullenrich.com/
@@ -126,9 +126,10 @@ Une fois qu'un propriétaire est révélé et qu'un dirigeant est identifié :
 ## 🔐 Sécurité
 
 - API key cadastre stockée côté serveur uniquement
-- Routes API protégées par authentification
-- RLS (Row Level Security) activé sur toutes les tables
+- Routes API protégées par authentification (JWT custom + autorisation par organisation)
+- Isolation des données par organisation appliquée au niveau applicatif (requêtes filtrées par `organization_id`)
 - Validation des données côté client et serveur
+- Tous les secrets (clés API, mots de passe) sont fournis via variables d'environnement, jamais committés
 
 ## 📱 Responsive Design
 

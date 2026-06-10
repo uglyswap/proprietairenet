@@ -133,16 +133,44 @@ export default function TableView({
     } catch {} finally { setListsLoading(false) }
   }
 
+  // Construit le payload attendu par POST /api/lists/items pour un resultat
+  const buildListItemPayload = (listId: string, result: CadastreResult) => {
+    const firstProp = result.proprietes[0]
+    return {
+      list_id: listId,
+      company_name: result.proprietaire.denomination,
+      director_name: result.proprietaire.dirigeant ?? null,
+      property_address: firstProp?.adresse ?? null,
+      property_postal_code: firstProp?.code_postal ?? null,
+      property_city: firstProp?.ville ?? null,
+      siren: result.proprietaire.siren ?? null,
+      data: result,
+    }
+  }
+
+  // Ajoute les resultats selectionnes a une liste via POST /api/lists/items (un item par requete)
+  const addItemsToList = async (listId: string, items: CadastreResult[]): Promise<number> => {
+    const responses = await Promise.all(
+      items.map((result) =>
+        fetch('/api/lists/items', {
+          method: 'POST',
+          headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+          body: JSON.stringify(buildListItemPayload(listId, result)),
+        })
+      )
+    )
+    return responses.filter((r) => r.ok).length
+  }
+
   const handleBulkAddToList = async (listId: string) => {
     const selected = results.filter((_, idx) => selectedResults.has(idx))
     try {
-      const res = await fetch('/api/lists/add', {
-        method: 'POST',
-        headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
-        body: JSON.stringify({ list_id: listId, results: selected })
-      })
-      if (res.ok) {
-        toast.success(`${selected.length} résultat(s) ajouté(s) à la liste !`)
+      const added = await addItemsToList(listId, selected)
+      if (added === selected.length) {
+        toast.success(`${added} résultat(s) ajouté(s) à la liste !`)
+        setShowAddToList(false)
+      } else if (added > 0) {
+        toast.warning(`${added}/${selected.length} résultat(s) ajouté(s). Certains ont échoué.`)
         setShowAddToList(false)
       } else {
         toast.error("Erreur lors de l'ajout")
@@ -154,18 +182,31 @@ export default function TableView({
     if (!newListName.trim()) return
     const selected = results.filter((_, idx) => selectedResults.has(idx))
     try {
+      // 1. Creer la liste (POST /api/lists n'accepte que name/description/color, ignore les items)
       const res = await fetch('/api/lists', {
         method: 'POST',
         headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: newListName, results: selected })
+        body: JSON.stringify({ name: newListName })
       })
-      if (res.ok) {
-        toast.success(`Liste "${newListName}" créée avec ${selected.length} résultat(s) !`)
-        setShowAddToList(false)
-        setNewListName('')
-      } else {
+      if (!res.ok) {
         toast.error('Erreur lors de la création')
+        return
       }
+      // 2. Recuperer l'id de la liste creee et y ajouter les items
+      const created = await res.json()
+      const listId: string | undefined = created?.list?.id
+      if (!listId) {
+        toast.error('Erreur lors de la création')
+        return
+      }
+      const added = await addItemsToList(listId, selected)
+      if (added === selected.length) {
+        toast.success(`Liste "${newListName}" créée avec ${added} résultat(s) !`)
+      } else {
+        toast.warning(`Liste "${newListName}" créée. ${added}/${selected.length} résultat(s) ajouté(s).`)
+      }
+      setShowAddToList(false)
+      setNewListName('')
     } catch { toast.error('Erreur réseau') }
   }
 
@@ -269,13 +310,8 @@ export default function TableView({
                   <TableRow>
                     <TableHead className="w-12">
                       <Checkbox
-                        checked={allSelected}
-                        onCheckedChange={handleSelectAll}
-                        ref={(el) => {
-                          if (el) {
-                            el.indeterminate = someSelected
-                          }
-                        }}
+                        checked={someSelected ? 'indeterminate' : allSelected}
+                        onCheckedChange={(checked) => handleSelectAll(checked === true)}
                         aria-label="Sélectionner tout"
                       />
                     </TableHead>

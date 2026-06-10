@@ -368,8 +368,9 @@ export default function DashboardPage() {
     }
   };
 
-  const handleReveal = async (indices: number[]) => {
-    // Les données cadastrales sont déjà visibles — pas besoin de révéler
+  // Signature alignee sur ResultsList (onReveal(result.id): string). Les donnees
+  // cadastrales sont deja visibles, la revelation est un no-op informatif.
+  const handleReveal = async (_id: string) => {
     toast.info("Les données sont déjà visibles. Utilisez les boutons d'action sur chaque résultat pour envoyer un courrier ou l'ajouter à une liste.");
   };
 

@@ -1,13 +1,21 @@
 import { query } from './db';
 import { Resend } from 'resend';
 
-const RESEND_KEY = process.env.RESEND_API_KEY || 're_Uf7EjMoK_9ar4JS3T7Af68HybEVezZPwk';
 const FROM_EMAIL = process.env.EMAIL_FROM || 'Proprietaire.net <noreply@proprietaire.net>';
 const APP_URL = process.env.NEXT_PUBLIC_APP_URL || 'https://proprietaire.net';
 
+// La cle Resend provient EXCLUSIVEMENT de l'environnement: aucun secret en dur.
+// Si elle est absente, on ne tente pas d'envoi (retour null) plutot que d'utiliser
+// une cle committee.
 let _resend: Resend | null = null;
-function getResend(): Resend {
-  if (!_resend) _resend = new Resend(RESEND_KEY);
+function getResend(): Resend | null {
+  if (_resend) return _resend;
+  const key = process.env.RESEND_API_KEY;
+  if (!key) {
+    console.error('[QUOTA-ALERTS] RESEND_API_KEY non configuree, envoi ignore');
+    return null;
+  }
+  _resend = new Resend(key);
   return _resend;
 }
 
@@ -158,7 +166,10 @@ async function sendQuotaEmail(
     const borderColor = params.urgent ? '#dc2626' : '#f59e0b';
     const ctaBg = params.urgent ? '#dc2626' : '#2563eb';
 
-    await getResend().emails.send({
+    const resend = getResend();
+    if (!resend) return false;
+
+    const { error } = await resend.emails.send({
       from: FROM_EMAIL,
       to: email,
       subject: params.subject,
@@ -187,6 +198,11 @@ async function sendQuotaEmail(
         </div>
       `,
     });
+    // Resend v4 ne throw pas sur erreur API: il faut inspecter le champ error.
+    if (error) {
+      console.error('[QUOTA-ALERTS] Email send error:', error);
+      return false;
+    }
     console.log(`[QUOTA-ALERTS] Sent ${params.subject} to ${email}`);
     return true;
   } catch (err) {

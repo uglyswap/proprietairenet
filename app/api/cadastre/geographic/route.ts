@@ -8,6 +8,28 @@ export const dynamic = 'force-dynamic';
 const CADASTRE_API_URL = process.env.CADASTRE_API_URL || 'http://84.247.175.132:8765';
 const CADASTRE_API_KEY = process.env.CADASTRE_API_KEY || '';
 
+// Timeout backend cadastre (le backend peut tenir plusieurs minutes)
+const BACKEND_TIMEOUT_MS = 120000;
+
+// Mappe un statut backend non-ok vers un message clair (ne pas avaler 401/403/429)
+function backendErrorMessage(status: number): string {
+  if (status === 401) return 'Authentification cadastre refusée';
+  if (status === 403) return 'Accès cadastre interdit';
+  if (status === 429) return 'Trop de requêtes vers le service cadastre, réessayez plus tard';
+  return 'Erreur du serveur cadastre';
+}
+
+// Fetch backend avec timeout (AbortController)
+async function fetchBackend(url: string, init: RequestInit = {}): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), BACKEND_TIMEOUT_MS);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function buildParcelleId(propriete: any): string | null {
   const dept = (propriete.departement || '').trim().padStart(2, '0');
   const commune = (propriete.code_commune || '').trim().padStart(3, '0');
@@ -127,10 +149,13 @@ export async function POST(req: NextRequest) {
     const { auth, error, status, upgrade_required } = await authenticateRequest(req, { checkSearch: true });
 
     if (!auth) {
-      
-    try { logAudit({ user: auth.user } as any, "search.zone", "search", null, {}, getIpFromRequest(req)); } catch {}
-    return NextResponse.json({ error, upgrade_required }, { status: status || 401 });
+      return NextResponse.json({ error, upgrade_required }, { status: status || 401 });
     }
+
+    // Audit de la recherche par zone reussie (auth non-null ici)
+    try {
+      logAudit(auth, "search.zone", "search", undefined, {}, getIpFromRequest(req));
+    } catch {}
 
     const body = await req.json();
     const { coordinates, limit = 200 } = body;
@@ -141,7 +166,7 @@ export async function POST(req: NextRequest) {
 
     const polygon = coordinates.map((coord: number[]) => [coord[0], coord[1]]);
 
-    const backendResponse = await fetch(`${CADASTRE_API_URL}/search/geo`, {
+    const backendResponse = await fetchBackend(`${CADASTRE_API_URL}/search/geo`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -153,7 +178,7 @@ export async function POST(req: NextRequest) {
     if (!backendResponse.ok) {
       const errorData = await backendResponse.json().catch(() => ({}));
       return NextResponse.json(
-        { error: errorData.error || 'Erreur du serveur cadastre' },
+        { error: errorData.error || backendErrorMessage(backendResponse.status) },
         { status: backendResponse.status }
       );
     }
@@ -228,6 +253,9 @@ export async function POST(req: NextRequest) {
 
   } catch (error: any) {
     console.error('[GEO] Error:', error);
+    if (error?.name === 'AbortError' || error?.name === 'TimeoutError') {
+      return NextResponse.json({ error: 'Délai dépassé côté serveur cadastre' }, { status: 504 });
+    }
     return NextResponse.json({ error: error.message || 'Erreur serveur' }, { status: 500 });
   }
 }

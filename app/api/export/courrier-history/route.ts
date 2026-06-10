@@ -1,13 +1,27 @@
 import { NextRequest, NextResponse } from "next/server";
 import { authenticateRequest } from "@/lib/api-auth";
+import { checkPermission } from "@/lib/permissions";
 import { query } from "@/lib/db";
 
 export const dynamic = "force-dynamic";
+
+// Neutralise l'injection de formule CSV (Excel/Sheets) : prefixe ' si la
+// valeur commence par un caractere declencheur de formule.
+function sanitizeCsvCell(value: unknown): string {
+  const s = value === null || value === undefined ? "" : String(value);
+  if (s.length > 0 && /^[=+\-@\t\r]/.test(s)) {
+    return "'" + s;
+  }
+  return s;
+}
 
 export async function GET(req: NextRequest) {
   try {
     const { auth, error, status } = await authenticateRequest(req);
     if (!auth) return NextResponse.json({ error }, { status: status || 401 });
+
+    const denied = await checkPermission(auth, "export");
+    if (denied) return denied;
 
     const result = await query(
       `SELECT 
@@ -32,13 +46,13 @@ export async function GET(req: NextRequest) {
         : '';
       return [
         new Date(row.created_at).toLocaleDateString('fr-FR'),
-        `"${name.replace(/"/g, '""')}"`,
-        `"${societe.replace(/"/g, '""')}"`,
-        `"${adresse.replace(/"/g, '""')}"`,
-        row.type_affranchissement || '',
-        row.status || '',
-        row.prix || '0',
-        row.credits_used || '0',
+        `"${sanitizeCsvCell(name).replace(/"/g, '""')}"`,
+        `"${sanitizeCsvCell(societe).replace(/"/g, '""')}"`,
+        `"${sanitizeCsvCell(adresse).replace(/"/g, '""')}"`,
+        sanitizeCsvCell(row.type_affranchissement || ''),
+        sanitizeCsvCell(row.status || ''),
+        sanitizeCsvCell(row.prix || '0'),
+        sanitizeCsvCell(row.credits_used || '0'),
       ].join(',');
     }).join('\n');
 

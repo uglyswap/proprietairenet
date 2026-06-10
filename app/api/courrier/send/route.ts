@@ -4,21 +4,12 @@ import { query } from "@/lib/db";
 import { createNotification } from "@/lib/notifications";
 import logger from "@/lib/logger";
 import { logAudit, getIpFromRequest } from "@/lib/audit";
+import { getCreditCost } from "@/lib/service-postal";
 
 export const dynamic = "force-dynamic";
 
 const SP_API_URL = process.env.SERVICE_POSTAL_API_URL || "https://prod-api.servicepostal.com";
 const SP_API_KEY = process.env.SERVICE_POSTAL_API_KEY || "";
-
-// Credit costs per affranchissement type
-const CREDIT_COSTS: Record<string, number> = {
-  verte: 410,
-  vertesuivi: 490,
-  performance: 520,
-  perfsuivi: 600,
-  lr: 1080,
-  lrar: 1250,
-};
 
 // Auto-create CRM contact from mail destinataire data
 async function autoCreateContact(orgId: string, userId: string, dest: any) {
@@ -62,6 +53,10 @@ async function autoCreateContact(orgId: string, userId: string, dest: any) {
 }
 
 export async function POST(req: NextRequest) {
+  // Suivi pour rembourser/revertir si l'envoi n'aboutit pas.
+  let refund: { orgId: string; cost: number } | null = null;
+  let claimed: { uid: string; orgId: string } | null = null;
+  let finalized = false;
   try {
     const { auth, error, status } = await authenticateRequest(req);
     if (!auth) return NextResponse.json({ error }, { status: status || 401 });
@@ -77,10 +72,15 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "UID du courrier requis" }, { status: 400 });
     }
 
+    const orgId = auth.user.organization_id;
+    if (!orgId) {
+      return NextResponse.json({ error: "Aucune organisation associée" }, { status: 400 });
+    }
+
     // Check that this mail belongs to the org and is in preview state
     const mailResult = await query(
       "SELECT * FROM mail_history WHERE service_postal_uid = $1 AND organization_id = $2",
-      [uid, auth.user.organization_id]
+      [uid, orgId]
     );
 
     if (mailResult.rows.length === 0) {
@@ -93,21 +93,38 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: `Courrier déjà traité (statut: ${mail.status})` }, { status: 400 });
     }
 
-    const creditCost = CREDIT_COSTS[mail.type_affranchissement] || 410;
+    // Source unique de verite pour le cout.
+    const creditCost = getCreditCost(mail.type_affranchissement);
     const adminBypass = isAdminUser(auth);
 
-    // Check credits (skip for admin)
-    if (!adminBypass) {
-      const orgResult = await query("SELECT credits_balance FROM organizations WHERE id = $1", [auth.user.organization_id]);
-      const org = orgResult.rows[0];
+    // Claim ATOMIQUE du courrier: passe 'preview' -> 'sending' en une requete. Deux
+    // requetes concurrentes ne peuvent pas valider le meme courrier deux fois (anti
+    // double-envoi/double-debit): seule celle qui obtient la ligne poursuit.
+    const claimResult = await query(
+      "UPDATE mail_history SET status = 'sending', updated_at = now() WHERE service_postal_uid = $1 AND organization_id = $2 AND status = 'preview' RETURNING id",
+      [uid, orgId]
+    );
+    if (claimResult.rows.length === 0) {
+      return NextResponse.json({ error: "Courrier déjà en cours de traitement" }, { status: 409 });
+    }
+    claimed = { uid, orgId };
 
-      if (!org || org.credits_balance < creditCost) {
+    // Debit ATOMIQUE avant l'envoi (skip admin). En cas d'echec, on rembourse et on
+    // remet le courrier en 'preview'.
+    if (!adminBypass) {
+      const deductResult = await query(
+        "UPDATE organizations SET credits_balance = credits_balance - $1, credits_used = credits_used + $1, updated_at = now() WHERE id = $2 AND credits_balance >= $1 RETURNING credits_balance",
+        [creditCost, orgId]
+      );
+      if (deductResult.rows.length === 0) {
+        await query("UPDATE mail_history SET status = 'preview', updated_at = now() WHERE service_postal_uid = $1 AND organization_id = $2", [uid, orgId]);
+        claimed = null;
         return NextResponse.json({
-          error: `Crédits insuffisants. Besoin: ${creditCost}, Disponible: ${org?.credits_balance || 0}`,
+          error: `Crédits insuffisants.`,
           credits_needed: creditCost,
-          credits_available: org?.credits_balance || 0,
         }, { status: 402 });
       }
+      refund = { orgId, cost: creditCost };
     }
 
     // Call Service Postal validate endpoint
@@ -123,6 +140,16 @@ export async function POST(req: NextRequest) {
     const spResult = await spResponse.json();
 
     if (!spResponse.ok) {
+      // Envoi echoue: rembourser le debit et remettre le courrier en 'preview'.
+      if (refund) {
+        await query(
+          "UPDATE organizations SET credits_balance = credits_balance + $1, credits_used = credits_used - $1, updated_at = now() WHERE id = $2",
+          [refund.cost, refund.orgId]
+        );
+        refund = null;
+      }
+      await query("UPDATE mail_history SET status = 'preview', updated_at = now() WHERE service_postal_uid = $1 AND organization_id = $2", [uid, orgId]);
+      claimed = null;
       logger.error('COURRIER', 'Service Postal error', { uid, error: spResult });
       return NextResponse.json({
         error: spResult.message || spResult.erreur || "Erreur du service postal",
@@ -130,41 +157,31 @@ export async function POST(req: NextRequest) {
       }, { status: spResponse.status });
     }
 
-    // Deduct credits atomically (skip for admin)
+    // Envoi reussi: debit definitif.
     if (!adminBypass) {
-      const deductResult = await query(
-        "UPDATE organizations SET credits_balance = credits_balance - $1, credits_used = credits_used + $1, updated_at = now() WHERE id = $2 AND credits_balance >= $1 RETURNING credits_balance",
-        [creditCost, auth.user.organization_id]
-      );
-      if (deductResult.rows.length === 0) {
-        // Credit deduction failed — balance insufficient (race condition protection)
-        return NextResponse.json({
-          error: `Crédits insuffisants.`,
-          credits_needed: creditCost,
-        }, { status: 402 });
-      }
       await query(
         "INSERT INTO credit_transactions (organization_id, user_id, amount, type, description) VALUES ($1, $2, $3, 'usage', $4)",
-        [auth.user.organization_id, auth.user.id, -creditCost, `Courrier postal ${mail.type_affranchissement} — ${uid}`]
+        [orgId, auth.user.id, -creditCost, `Courrier postal ${mail.type_affranchissement} — ${uid}`]
       );
     }
 
-    // Update mail_history
+    // Update mail_history -> sent
     await query(
       "UPDATE mail_history SET status = 'sent', credits_used = $1, sent_at = now(), updated_at = now() WHERE service_postal_uid = $2 AND organization_id = $3",
-      [adminBypass ? 0 : creditCost, uid, auth.user.organization_id]
+      [adminBypass ? 0 : creditCost, uid, orgId]
     );
+    finalized = true;
 
     // Auto-create CRM contact
     if (mail.destinataire) {
       const dest = typeof mail.destinataire === 'string' ? JSON.parse(mail.destinataire) : mail.destinataire;
-      await autoCreateContact(auth.user.organization_id!, auth.user.id, dest);
+      await autoCreateContact(orgId, auth.user.id, dest);
     }
 
     // Create notification for courrier sent
     const recipientName = mail.recipient_name || 'destinataire';
     await createNotification(
-      auth.user.organization_id!,
+      orgId,
       auth.user.id,
       'courrier_sent',
       'Courrier envoyé',
@@ -173,13 +190,13 @@ export async function POST(req: NextRequest) {
     );
 
     // Check if credits are low (< 20%)
-    const orgBalanceResult = await query("SELECT credits_balance, credits_used FROM organizations WHERE id = $1", [auth.user.organization_id]);
+    const orgBalanceResult = await query("SELECT credits_balance, credits_used FROM organizations WHERE id = $1", [orgId]);
     const orgBalance = orgBalanceResult.rows[0];
     if (orgBalance) {
       const totalCredits = orgBalance.credits_balance + orgBalance.credits_used;
       if (totalCredits > 0 && orgBalance.credits_balance / totalCredits < 0.2) {
         await createNotification(
-          auth.user.organization_id!,
+          orgId,
           auth.user.id,
           'credit_low',
           'Crédits bas',
@@ -189,7 +206,7 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    logger.info('COURRIER', 'Mail sent successfully', { uid, creditCost, orgId: auth.user.organization_id });
+    logger.info('COURRIER', 'Mail sent successfully', { uid, creditCost, orgId });
 
     return NextResponse.json({
       success: true,
@@ -201,6 +218,25 @@ export async function POST(req: NextRequest) {
         : `Courrier validé et envoyé avec succès (${creditCost} crédits)`,
     });
   } catch (err: any) {
+    // Si on a debite et/ou claime sans finaliser l'envoi, rembourser et remettre en 'preview'.
+    if (!finalized) {
+      try {
+        if (refund) {
+          await query(
+            "UPDATE organizations SET credits_balance = credits_balance + $1, credits_used = credits_used - $1, updated_at = now() WHERE id = $2",
+            [refund.cost, refund.orgId]
+          );
+        }
+        if (claimed) {
+          await query(
+            "UPDATE mail_history SET status = 'preview', updated_at = now() WHERE service_postal_uid = $1 AND organization_id = $2 AND status = 'sending'",
+            [claimed.uid, claimed.orgId]
+          );
+        }
+      } catch (compErr) {
+        logger.error('COURRIER', 'Echec compensation (refund/revert)', { error: (compErr as any).message });
+      }
+    }
     logger.error('COURRIER', 'Send error', { error: err.message });
     return NextResponse.json({ error: err.message || "Erreur serveur" }, { status: 500 });
   }

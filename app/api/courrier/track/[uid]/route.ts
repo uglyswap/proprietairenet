@@ -101,7 +101,7 @@ export async function GET(
       numero_suivi: spResult.numero_suivi_laposte || null,
       evenements: events.map((e: any) => ({
         ...e,
-        label: {
+        label: ({
           'soumis': 'Commande soumise',
           'courrier_produit': 'Imprimé, mis sous pli et affranchi',
           'pris_en_charge': 'Pris en charge par La Poste',
@@ -111,7 +111,7 @@ export async function GET(
           'retour_expediteur': 'Retourné à l\'expéditeur',
           'attente_retrait_guichet': 'En attente de retrait au guichet',
           'ar_scanne': 'Accusé de réception scanné',
-        }[e.code_statut] || e.message_statut || e.code_statut,
+        } as Record<string, string>)[e.code_statut] || e.message_statut || e.code_statut,
       })),
       status: bestStatus,
       is_delivered: isDelivered,

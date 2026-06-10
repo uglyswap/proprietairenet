@@ -102,8 +102,8 @@ export default function HeroParticles() {
   return (
     <canvas
       ref={canvasRef}
-      className="absolute inset-0 w-full h-full pointer-events-auto" style={{maxWidth: "100vw"}}
-      style={{ zIndex: 1 }}
+      className="absolute inset-0 w-full h-full pointer-events-auto"
+      style={{ maxWidth: '100vw', zIndex: 1 }}
     />
   );
 }

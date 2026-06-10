@@ -6,14 +6,18 @@ export const dynamic = "force-dynamic";
 // Webhook called by FullEnrich when enrichment is complete
 export async function POST(req: NextRequest) {
   try {
-    // Verify webhook secret
+    // Verify webhook secret (fail-closed): sans secret configure, on refuse le webhook
+    // plutot que de l'accepter sans authentification (sinon n'importe qui peut pousser
+    // de faux resultats d'enrichissement).
     const webhookSecret = process.env.ENRICH_WEBHOOK_SECRET;
-    if (webhookSecret) {
-      const authHeader = req.headers.get('authorization') || '';
-      const querySecret = new URL(req.url).searchParams.get('secret') || '';
-      if (authHeader !== `Bearer ${webhookSecret}` && querySecret !== webhookSecret) {
-        return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-      }
+    if (!webhookSecret) {
+      console.error('[ENRICH WEBHOOK] ENRICH_WEBHOOK_SECRET non configuré, webhook refusé');
+      return NextResponse.json({ error: "Webhook secret not configured" }, { status: 503 });
+    }
+    const authHeader = req.headers.get('authorization') || '';
+    const querySecret = new URL(req.url).searchParams.get('secret') || '';
+    if (authHeader !== `Bearer ${webhookSecret}` && querySecret !== webhookSecret) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
     const body = await req.json();

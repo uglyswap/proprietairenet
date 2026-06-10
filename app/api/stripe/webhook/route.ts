@@ -16,18 +16,46 @@ export async function POST(req: NextRequest) {
   const body = await req.text();
   const sig = req.headers.get("stripe-signature") || "";
 
+  // Fail-closed: sans secret de webhook configure, on REFUSE de traiter la requete.
+  // Ne jamais faire confiance a un body non signe (sinon n'importe qui peut forger
+  // un evenement de paiement et se crediter gratuitement).
+  if (!webhookSecret) {
+    logger.error('STRIPE', 'STRIPE_WEBHOOK_SECRET non configure — webhook refuse');
+    return NextResponse.json({ error: "Webhook secret not configured" }, { status: 500 });
+  }
+
   let event: Stripe.Event;
 
   try {
-    if (webhookSecret) {
-      event = stripe.webhooks.constructEvent(body, sig, webhookSecret);
-    } else {
-      logger.warn('STRIPE', 'No webhook secret configured — parsing body directly');
-      event = JSON.parse(body) as Stripe.Event;
-    }
+    event = stripe.webhooks.constructEvent(body, sig, webhookSecret);
   } catch (err: any) {
     logger.error('STRIPE', 'Signature verification failed', { error: err.message });
     return NextResponse.json({ error: "Invalid signature" }, { status: 400 });
+  }
+
+  // Idempotence: un evenement Stripe peut etre rejoue (retry sur timeout). On
+  // enregistre chaque event.id et on ignore tout doublon, pour ne jamais crediter
+  // deux fois. La table est creee si absente (defensif, comme le reste du code).
+  try {
+    await query(
+      `CREATE TABLE IF NOT EXISTS stripe_events (
+         event_id TEXT PRIMARY KEY,
+         type TEXT,
+         processed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+       )`
+    );
+    const insert = await query(
+      `INSERT INTO stripe_events (event_id, type) VALUES ($1, $2)
+       ON CONFLICT (event_id) DO NOTHING`,
+      [event.id, event.type]
+    );
+    if (insert.rowCount === 0) {
+      logger.info('STRIPE', 'Evenement deja traite, ignore (idempotence)', { eventId: event.id });
+      return NextResponse.json({ received: true, duplicate: true });
+    }
+  } catch (err: any) {
+    logger.error('STRIPE', 'Echec du verrou idempotence', { error: err.message });
+    return NextResponse.json({ error: "Idempotency store error" }, { status: 500 });
   }
 
   try {

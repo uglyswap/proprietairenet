@@ -8,6 +8,38 @@ export const dynamic = 'force-dynamic';
 const CADASTRE_API_URL = process.env.CADASTRE_API_URL || 'http://cadastre-api:3001';
 const CADASTRE_API_KEY = process.env.CADASTRE_API_KEY || '';
 
+// Timeout backend cadastre (le backend peut tenir plusieurs minutes)
+const BACKEND_TIMEOUT_MS = 120000;
+
+// Erreur backend porteuse d'un statut HTTP a propager au frontend
+class BackendError extends Error {
+  status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = 'BackendError';
+    this.status = status;
+  }
+}
+
+// Mappe un statut backend non-ok vers un message clair (ne pas avaler 401/403/429)
+function backendErrorMessage(status: number): string {
+  if (status === 401) return 'Authentification cadastre refusée';
+  if (status === 403) return 'Accès cadastre interdit';
+  if (status === 429) return 'Trop de requêtes vers le service cadastre, réessayez plus tard';
+  return 'Erreur du serveur cadastre';
+}
+
+// Fetch backend avec timeout (AbortController) et propagation des erreurs non-ok
+async function fetchBackend(url: string, init: RequestInit = {}): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), BACKEND_TIMEOUT_MS);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function buildParcelleId(propriete: any): string | null {
   // Construire l'IDU 14 chars : dept(2) + commune(3) + prefix(3) + section(2) + numero(4)
   const dept = (propriete.departement || "").trim().padStart(2, "0");
@@ -123,9 +155,13 @@ export async function POST(req: NextRequest) {
     const { auth, error, status, upgrade_required } = await authenticateRequest(req, { checkSearch: true });
 
     if (!auth) {
-      try { logAudit({ user: auth.user } as any, "search.address", "search", null, {}, getIpFromRequest(req)); } catch {}
       return NextResponse.json({ error, upgrade_required }, { status: status || 401 });
     }
+
+    // Audit de la recherche reussie (auth non-null ici)
+    try {
+      logAudit(auth, "search.address", "search", undefined, {}, getIpFromRequest(req));
+    } catch {}
 
     const body = await req.json();
     const { adresse, adresses, code_postal, departement, denomination, siren, limit = 200,
@@ -135,32 +171,34 @@ export async function POST(req: NextRequest) {
     let searchType = 'text';
 
     if (siren) {
-      const backendResponse = await fetch(
+      const backendResponse = await fetchBackend(
         `${CADASTRE_API_URL}/search/siren?siren=${encodeURIComponent(siren)}${departement ? `&departement=${departement}` : ''}`,
         { headers: { 'X-API-Key': CADASTRE_API_KEY } }
       );
-      if (backendResponse.ok) {
-        const data = await backendResponse.json();
-        if (data.success && (data.proprietaire || data.proprietes?.length > 0)) {
-          allResults = [{
-            proprietaire: data.proprietaire,
-            entreprise: data.entreprise,
-            proprietes: data.proprietes,
-            nombre_adresses: data.nombre_adresses,
-            nombre_lots: data.nombre_lots,
-          }];
-        }
+      if (!backendResponse.ok) {
+        throw new BackendError(backendErrorMessage(backendResponse.status), backendResponse.status);
+      }
+      const data = await backendResponse.json();
+      if (data.success && (data.proprietaire || data.proprietes?.length > 0)) {
+        allResults = [{
+          proprietaire: data.proprietaire,
+          entreprise: data.entreprise,
+          proprietes: data.proprietes,
+          nombre_adresses: data.nombre_adresses,
+          nombre_lots: data.nombre_lots,
+        }];
       }
       searchType = 'siren';
     } else if (denomination) {
-      const backendResponse = await fetch(
+      const backendResponse = await fetchBackend(
         `${CADASTRE_API_URL}/search/owner?denomination=${encodeURIComponent(denomination)}${departement ? `&departement=${departement}` : ''}&limit=${limit}`,
         { headers: { 'X-API-Key': CADASTRE_API_KEY } }
       );
-      if (backendResponse.ok) {
-        const data = await backendResponse.json();
-        if (data.success && data.resultats) allResults = data.resultats;
+      if (!backendResponse.ok) {
+        throw new BackendError(backendErrorMessage(backendResponse.status), backendResponse.status);
       }
+      const data = await backendResponse.json();
+      if (data.success && data.resultats) allResults = data.resultats;
       searchType = 'owner';
     } else if (adresses && Array.isArray(adresses)) {
       for (const addr of adresses) {
@@ -168,14 +206,19 @@ export async function POST(req: NextRequest) {
         try {
           const params = new URLSearchParams({ adresse: addr.adresse, limit: '10' });
           if (addr.departement) params.set('departement', addr.departement);
-          const resp = await fetch(`${CADASTRE_API_URL}/search/address?${params}`, {
+          const resp = await fetchBackend(`${CADASTRE_API_URL}/search/address?${params}`, {
             headers: { 'X-API-Key': CADASTRE_API_KEY },
           });
           if (resp.ok) {
             const data = await resp.json();
             if (data.success && data.resultats) allResults.push(...data.resultats);
+          } else if (resp.status === 401 || resp.status === 403 || resp.status === 429) {
+            // Erreur globale (cle API ou rate limit) : propager au lieu d'avaler
+            throw new BackendError(backendErrorMessage(resp.status), resp.status);
           }
         } catch (err) {
+          // Propager les erreurs globales, tolerer les erreurs par adresse
+          if (err instanceof BackendError) throw err;
           console.error('[SEARCH] Batch error:', err);
         }
       }
@@ -188,13 +231,14 @@ export async function POST(req: NextRequest) {
       if (departement) params.set('departement', departement);
       if (code_postal) params.set('code_postal', code_postal);
 
-      const backendResponse = await fetch(`${CADASTRE_API_URL}/search/address?${params}`, {
+      const backendResponse = await fetchBackend(`${CADASTRE_API_URL}/search/address?${params}`, {
         headers: { 'X-API-Key': CADASTRE_API_KEY },
       });
-      if (backendResponse.ok) {
-        const data = await backendResponse.json();
-        if (data.success && data.resultats) allResults = data.resultats;
+      if (!backendResponse.ok) {
+        throw new BackendError(backendErrorMessage(backendResponse.status), backendResponse.status);
       }
+      const data = await backendResponse.json();
+      if (data.success && data.resultats) allResults = data.resultats;
       searchType = 'address';
     } else {
       return NextResponse.json({ error: 'Paramètre de recherche manquant' }, { status: 400 });
@@ -294,6 +338,12 @@ export async function POST(req: NextRequest) {
 
   } catch (error: any) {
     console.error('[SEARCH] Error:', error);
+    if (error instanceof BackendError) {
+      return NextResponse.json({ error: error.message }, { status: error.status });
+    }
+    if (error?.name === 'AbortError' || error?.name === 'TimeoutError') {
+      return NextResponse.json({ error: 'Délai dépassé côté serveur cadastre' }, { status: 504 });
+    }
     return NextResponse.json({ error: error.message || 'Erreur serveur' }, { status: 500 });
   }
 }

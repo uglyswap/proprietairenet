@@ -24,14 +24,20 @@ export async function POST(req: NextRequest) {
     }
 
     const body = await req.json();
-    
-    logAudit(auth, "stripe.checkout", "payment", null, { amount: body.credits || body.plan_slug }, getIpFromRequest(req));
+
+    // L'organisation est requise pour toute operation de facturation.
+    const orgId = auth.user.organization_id;
+    if (!orgId) {
+      return NextResponse.json({ error: "Aucune organisation associée au compte" }, { status: 400 });
+    }
+
+    logAudit(auth, "stripe.checkout", "payment", undefined, { amount: body.credits || body.plan_slug }, getIpFromRequest(req));
     const { type, plan_slug, credit_pack_id, extra_users, credits: customCredits, billing_period } = body;
 
     const customerId = await getOrCreateStripeCustomer(
-      auth.user.organization_id,
+      orgId,
       auth.user.email,
-      auth.user.first_name
+      auth.user.first_name ?? undefined
     );
 
     const baseUrl = process.env.NEXT_PUBLIC_URL || "https://proprietaire.net";
@@ -48,14 +54,19 @@ export async function POST(req: NextRequest) {
         priceId = plan.stripe_annual_price_id;
       }
 
+      // Valider extra_users: entier >= 0 borne (evite quantites negatives/absurdes).
+      const extraUsers = Number.isInteger(extra_users) && extra_users > 0
+        ? Math.min(extra_users, 100)
+        : 0;
+
       const session = await createCheckoutSession({
         customerId,
         priceId,
-        orgId: auth.user.organization_id,
+        orgId,
         userId: auth.user.id,
         successUrl: `${baseUrl}/dashboard?payment=success`,
         cancelUrl: `${baseUrl}/pricing?payment=cancelled`,
-        extraUsers: extra_users || 0,
+        extraUsers,
         extraUserPriceId: plan.stripe_extra_user_price_id || undefined,
       });
 
@@ -79,7 +90,8 @@ export async function POST(req: NextRequest) {
               name: `${pack.credits.toLocaleString('fr-FR')} crédits courrier`,
               description: `Pack ${pack.name} — Proprietaire.net`,
             },
-            unit_amount: (parseInt(pack.price) * 100),
+            // parseFloat (pas parseInt) sinon un prix decimal "9.99" serait tronque a 9.
+            unit_amount: Math.round(parseFloat(pack.price) * 100),
             tax_behavior: "inclusive" as const,
           },
           quantity: 1,
@@ -87,7 +99,7 @@ export async function POST(req: NextRequest) {
         success_url: `${baseUrl}/dashboard?credits=success`,
         cancel_url: `${baseUrl}/pricing?credits=cancelled`,
         metadata: {
-          organization_id: auth.user.organization_id,
+          organization_id: orgId,
           user_id: auth.user.id,
           credits: String(pack.credits),
           type: "credit_purchase",
@@ -134,7 +146,7 @@ export async function POST(req: NextRequest) {
         success_url: `${baseUrl}/dashboard?credits=success`,
         cancel_url: `${baseUrl}/pricing?credits=cancelled`,
         metadata: {
-          organization_id: auth.user.organization_id,
+          organization_id: orgId,
           user_id: auth.user.id,
           credits: String(roundedCredits),
           type: "credit_purchase",

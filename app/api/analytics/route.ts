@@ -9,7 +9,13 @@ export async function GET(req: NextRequest) {
     const { auth, error, status } = await authenticateRequest(req);
     if (!auth) return NextResponse.json({ error }, { status: status || 401 });
 
+    // Verification d'appartenance : l'utilisateur doit etre rattache a une organisation.
+    // Toutes les requetes ci-dessous sont ensuite filtrees par cet organization_id (cloisonnement).
     const orgId = auth.user.organization_id;
+    if (!orgId) {
+      return NextResponse.json({ error: "Aucune organisation associée" }, { status: 403 });
+    }
+
     const now = new Date();
     const firstOfMonth = new Date(now.getFullYear(), now.getMonth(), 1).toISOString();
     const firstOfLastMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1).toISOString();

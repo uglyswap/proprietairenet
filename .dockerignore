@@ -3,6 +3,10 @@ node_modules
 .bolt
 *.zip
 .git
+# Ne jamais copier les secrets d'environnement dans l'image Docker
+.env
+.env.*
+!.env.example
 README.md
 ADMIN_GUIDE.md
 ADMIN_CONFIG_FULLENRICH.md

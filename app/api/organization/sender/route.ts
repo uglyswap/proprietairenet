@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { authenticateRequest } from "@/lib/api-auth";
+import { checkPermission } from "@/lib/permissions";
 import { query } from "@/lib/db";
 
 export const dynamic = "force-dynamic";
@@ -34,6 +35,11 @@ export async function PUT(req: NextRequest) {
   try {
     const { auth, error, status } = await authenticateRequest(req);
     if (!auth) return NextResponse.json({ error }, { status: status || 401 });
+
+    // Seuls owner/admin de l'org ou un role disposant de settings.edit peuvent modifier
+    // le profil expediteur (les admins plateforme passent via checkPermission).
+    const permError = await checkPermission(auth, "settings.edit");
+    if (permError) return permError;
 
     const body = await req.json();
     const {

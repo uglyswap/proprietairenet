@@ -385,22 +385,28 @@ export default function ResultsList({ results, onExport, onReveal, onCreditsUpda
     const e = (result as any).enrichissement || {}
     const prop = result.proprietes?.[0]
     const sep = ';'
-    const esc = (s: string) => `"${(s || '').replace(/"/g, '""')}"`
+    // Neutralise l'injection de formule CSV (Excel/Sheets) : prefixe ' si la
+    // valeur commence par un caractere declencheur de formule.
+    const sanitizeCsvCell = (value: unknown): string => {
+      const s = value === null || value === undefined ? '' : String(value)
+      return s.length > 0 && /^[=+\-@\t\r]/.test(s) ? `'${s}` : s
+    }
+    const esc = (s: unknown) => `"${sanitizeCsvCell(s).replace(/"/g, '""')}"`
     const headers = ['Dénomination','Forme Juridique','SIREN','Type','Adresse','Code Postal','Ville','Réf Cadastrale','Type Bien','Surface Parcelle','Surface Bâtie','Prix/m²','Année Construction'].join(sep)
     const row = [
       esc(result.proprietaire.denomination),
       esc(result.proprietaire.forme_juridique || ''),
-      result.proprietaire.siren || '',
+      sanitizeCsvCell(result.proprietaire.siren || ''),
       result.proprietaire.type === 'personne_morale' ? 'Personne morale' : 'Personne physique',
       esc(prop?.adresse || ''),
-      prop?.code_postal || '',
+      sanitizeCsvCell(prop?.code_postal || ''),
       esc(prop?.ville || ''),
-      prop?.reference_cadastrale || '',
+      sanitizeCsvCell(prop?.reference_cadastrale || ''),
       esc(e.type_bien || ''),
-      e.surface_parcelle || '',
-      e.surface_batie || '',
-      e.prix_m2 || '',
-      e.annee_construction || ''
+      sanitizeCsvCell(e.surface_parcelle || ''),
+      sanitizeCsvCell(e.surface_batie || ''),
+      sanitizeCsvCell(e.prix_m2 || ''),
+      sanitizeCsvCell(e.annee_construction || '')
     ].join(sep)
     const bom = '\uFEFF'
     const blob = new Blob([bom + headers + '\n' + row], { type: 'text/csv;charset=utf-8' })

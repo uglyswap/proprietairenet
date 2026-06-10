@@ -1,22 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { authenticateRequest, isAdminUser } from "@/lib/api-auth";
 import { query } from "@/lib/db";
+import { getCreditCost } from "@/lib/service-postal";
 
 export const dynamic = "force-dynamic";
 
 const SP_API_URL = process.env.SERVICE_POSTAL_API_URL || "https://prod-api.servicepostal.com";
 const SP_API_KEY = process.env.SERVICE_POSTAL_API_KEY || "";
-
-// Credit costs per affranchissement type
-const CREDIT_COSTS: Record<string, number> = {
-  ecopli: 2,
-  verte: 3,
-  vertesuivi: 4,
-  performance: 3,
-  perfsuivi: 4,
-  lr: 5,
-  lrar: 6,
-};
 
 // Auto-create CRM contact from mail destinataire data
 async function autoCreateContact(orgId: string, userId: string, dest: any) {
@@ -60,6 +50,9 @@ async function autoCreateContact(orgId: string, userId: string, dest: any) {
 }
 
 export async function POST(req: NextRequest) {
+  // Suivi du debit pour pouvoir rembourser si l'envoi n'aboutit pas.
+  let refund: { orgId: string; cost: number } | null = null;
+  let mailSent = false;
   try {
     const { auth, error, status } = await authenticateRequest(req);
     if (!auth) return NextResponse.json({ error }, { status: status || 401 });
@@ -88,7 +81,8 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Fichier requis (format + contenu_base64)" }, { status: 400 });
     }
 
-    const creditCost = CREDIT_COSTS[type_affranchissement] || 3;
+    // Source unique de verite pour le cout en credits (lib/service-postal).
+    const creditCost = getCreditCost(type_affranchissement);
     const adminBypass = isAdminUser(auth);
 
     // Check credits (skip for admin)
@@ -100,15 +94,26 @@ export async function POST(req: NextRequest) {
       [auth.user.organization_id]
     );
     const org = orgResult.rows[0];
+    if (!org) {
+      return NextResponse.json({ error: "Organisation introuvable" }, { status: 404 });
+    }
 
+    // Debit ATOMIQUE avant l'envoi: empeche la double-depense concurrente (TOCTOU) et
+    // garantit qu'on ne poste jamais un courrier sans avoir securise les credits.
+    // En cas d'echec d'envoi, on rembourse (refund ci-dessous).
     if (!adminBypass) {
-      if (!org || org.credits_balance < creditCost) {
+      const debit = await query(
+        "UPDATE organizations SET credits_balance = credits_balance - $1, credits_used = credits_used + $1, updated_at = now() WHERE id = $2 AND credits_balance >= $1 RETURNING credits_balance",
+        [creditCost, auth.user.organization_id]
+      );
+      if (debit.rows.length === 0) {
         return NextResponse.json({
-          error: `Crédits insuffisants. Besoin: ${creditCost}, Disponible: ${org?.credits_balance || 0}`,
+          error: `Crédits insuffisants. Besoin: ${creditCost}, Disponible: ${org.credits_balance || 0}`,
           credits_needed: creditCost,
-          credits_available: org?.credits_balance || 0,
+          credits_available: org.credits_balance || 0,
         }, { status: 402 });
       }
+      refund = { orgId: auth.user.organization_id!, cost: creditCost };
     }
 
     // Build expedition address from sender profile (preferred) or org fields (fallback)
@@ -170,6 +175,14 @@ export async function POST(req: NextRequest) {
     const spResult = await spResponse.json();
 
     if (!spResponse.ok) {
+      // Le courrier n'est pas parti: rembourser le debit effectue avant l'envoi.
+      if (refund) {
+        await query(
+          "UPDATE organizations SET credits_balance = credits_balance + $1, credits_used = credits_used - $1, updated_at = now() WHERE id = $2",
+          [refund.cost, refund.orgId]
+        );
+        refund = null;
+      }
       console.error("[COURRIER DIRECT] Service Postal error:", spResult);
       return NextResponse.json({
         error: spResult.message || spResult.erreur || "Erreur du service postal",
@@ -177,18 +190,11 @@ export async function POST(req: NextRequest) {
       }, { status: spResponse.status });
     }
 
-    // Deduct credits atomically (skip for admin)
+    // L'envoi a reussi: le debit est definitif, on n'a plus a rembourser.
+    mailSent = true;
+
+    // Tracer la transaction de credits (skip admin)
     if (!adminBypass) {
-      const deductResult = await query(
-        "UPDATE organizations SET credits_balance = credits_balance - $1, credits_used = credits_used + $1, updated_at = now() WHERE id = $2 AND credits_balance >= $1 RETURNING credits_balance",
-        [creditCost, auth.user.organization_id]
-      );
-      if (deductResult.rows.length === 0) {
-        return NextResponse.json({
-          error: `Crédits insuffisants.`,
-          credits_needed: creditCost,
-        }, { status: 402 });
-      }
       await query(
         "INSERT INTO credit_transactions (organization_id, user_id, amount, type, description) VALUES ($1, $2, $3, 'usage', $4)",
         [auth.user.organization_id, auth.user.id, -creditCost, `Courrier direct ${type_affranchissement} — ${spResult.uid}`]
@@ -233,6 +239,17 @@ export async function POST(req: NextRequest) {
         : `Courrier envoyé avec succès (${creditCost} crédits)`,
     });
   } catch (err: any) {
+    // Si on a debite mais que le courrier n'est pas parti, rembourser.
+    if (refund && !mailSent) {
+      try {
+        await query(
+          "UPDATE organizations SET credits_balance = credits_balance + $1, credits_used = credits_used - $1, updated_at = now() WHERE id = $2",
+          [refund.cost, refund.orgId]
+        );
+      } catch (refundErr) {
+        console.error("[COURRIER DIRECT] Echec du remboursement:", refundErr);
+      }
+    }
     console.error("[COURRIER DIRECT]", err);
     return NextResponse.json({ error: err.message || "Erreur serveur" }, { status: 500 });
   }

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query } from '@/lib/db';
 import { hashPassword } from '@/lib/auth';
+import crypto from 'crypto';
 
 export const dynamic = 'force-dynamic';
 
@@ -23,10 +24,14 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Find user with valid token
+    // Le token est stocke hashe en base (cf. forgot-password): on hashe le token
+    // recu avec le meme algorithme avant le lookup pour rester coherent.
+    const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+
+    // Find user with valid token (hash + expiration non depassee)
     const result = await query(
       'SELECT id FROM users WHERE password_reset_token = $1 AND password_reset_expires > NOW()',
-      [token]
+      [tokenHash]
     );
 
     if (result.rows.length === 0) {
@@ -36,11 +41,19 @@ export async function POST(req: NextRequest) {
     const userId = result.rows[0].id;
     const passwordHash = await hashPassword(password);
 
-    // Update password and clear token
+    // Update password and clear token (usage unique: token efface)
     await query(
       'UPDATE users SET password_hash = $1, password_reset_token = NULL, password_reset_expires = NULL WHERE id = $2',
       [passwordHash, userId]
     );
+
+    // TODO(securite): invalider les sessions JWT existantes apres reset.
+    // Actuellement impossible sans changement de schema: le JWT signe dans
+    // lib/auth.ts (generateToken) ne porte pas de champ de version (jti/token_version)
+    // et la table users ne possede pas de colonne token_version. Les tokens
+    // emis avant le reset restent donc valides jusqu'a leur expiration (7j).
+    // Pour corriger: ajouter une colonne users.token_version (migration), l'inclure
+    // dans le payload JWT, l'incrementer ici, et la verifier dans getUserFromToken.
 
     return NextResponse.json({
       success: true,

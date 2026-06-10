@@ -22,6 +22,17 @@ Deno.serve(async (req: Request) => {
   }
 
   try {
+    // Authentification obligatoire: sans secret partage, cette fonction serait un
+    // relais email ouvert (envoi d'emails arbitraires avec la cle Resend de l'org).
+    const functionSecret = Deno.env.get('EMAIL_FUNCTION_SECRET');
+    const provided = req.headers.get('x-function-secret') || '';
+    if (!functionSecret || provided !== functionSecret) {
+      return new Response(
+        JSON.stringify({ success: false, error: 'Unauthorized' }),
+        { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
     const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
     const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
     const supabase = createClient(supabaseUrl, supabaseKey);
@@ -41,6 +52,21 @@ Deno.serve(async (req: Request) => {
 
     // Parse request body
     const emailData: EmailRequest = await req.json();
+
+    // Validation minimale du destinataire et du contenu
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailData?.to || typeof emailData.to !== 'string' || !emailRegex.test(emailData.to)) {
+      return new Response(
+        JSON.stringify({ success: false, error: 'Destinataire invalide' }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+    if (!emailData.subject || !emailData.html) {
+      return new Response(
+        JSON.stringify({ success: false, error: 'subject et html requis' }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
 
     // Get default from email if not provided
     const { data: fromSettings } = await supabase

@@ -424,28 +424,17 @@ export default function TeamPage() {
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
+                          {/* Roles alignes sur ceux acceptes par le serveur (PATCH /api/organization/users : admin, user) */}
                           <SelectItem value="admin">
                             <div className="flex items-center gap-1.5">
                               <ShieldCheck className="h-3 w-3 text-blue-600" />
                               Administrateur
                             </div>
                           </SelectItem>
-                          <SelectItem value="manager">
-                            <div className="flex items-center gap-1.5">
-                              <Shield className="h-3 w-3 text-purple-600" />
-                              Manager
-                            </div>
-                          </SelectItem>
-                          <SelectItem value="agent">
-                            <div className="flex items-center gap-1.5">
-                              <User className="h-3 w-3 text-green-600" />
-                              Agent
-                            </div>
-                          </SelectItem>
-                          <SelectItem value="viewer">
+                          <SelectItem value="user">
                             <div className="flex items-center gap-1.5">
                               <User className="h-3 w-3 text-gray-600" />
-                              Lecteur
+                              Membre
                             </div>
                           </SelectItem>
                         </SelectContent>

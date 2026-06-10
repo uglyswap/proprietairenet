@@ -24,6 +24,8 @@ export interface ClientOrganization {
   monthly_searches_used: number;
   monthly_searches_limit: number;
   max_users: number;
+  // Profil expediteur (renvoye par /api/auth/me), utilise pour pre-remplir l'expediteur des courriers.
+  sender_company?: string | null;
 }
 
 // Store token

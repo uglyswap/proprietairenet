@@ -12,7 +12,15 @@ export interface ApiAuthResult {
   };
 }
 
-// Authenticate request and optionally check search limit
+// Authenticate request and optionally check search limit.
+//
+// CONTRAT (important): la limite de recherches gratuites n'est appliquee QUE si
+// l'appelant passe explicitement { checkSearch: true }. Par defaut checkSearch
+// est false, donc l'authentification seule N'INCREMENTE PAS et NE BLOQUE PAS le
+// quota. Toute route qui consomme une recherche payante/limitee DOIT passer
+// { checkSearch: true } (cf. app/api/cadastre/search et /geographic). Oublier ce
+// flag laisse la recherche illimitee de fait: c'est une decision a faire par route,
+// pas un defaut applique partout (certaines routes lisent sans consommer de quota).
 export async function authenticateRequest(
   req: NextRequest,
   options: { checkSearch?: boolean } = {}

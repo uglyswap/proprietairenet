@@ -1,11 +1,36 @@
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import { query } from '@/lib/db';
 
 export const dynamic = 'force-dynamic';
 
 const startTime = Date.now();
 
-export async function GET() {
+// Le detail (config infra, versions, memoire) n'est expose que si le secret correspond.
+function isAuthorizedForDetails(req: NextRequest): boolean {
+  const expected = process.env.HEALTH_SECRET;
+  if (!expected) return false; // pas de secret configure -> jamais de detail public
+  const provided = req.headers.get('x-health-secret') || req.nextUrl.searchParams.get('secret');
+  return provided === expected;
+}
+
+export async function GET(req: NextRequest) {
+  const detailed = isAuthorizedForDetails(req);
+
+  // Healthcheck basique non authentifie : on verifie juste que le process repond et que la DB
+  // est joignable, sans divulguer l'etat de configuration. Renvoie 200 quand vivant.
+  if (!detailed) {
+    let dbAlive = true;
+    try {
+      await query('SELECT 1');
+    } catch {
+      dbAlive = false;
+    }
+    return NextResponse.json({
+      status: dbAlive ? 'ok' : 'degraded',
+      timestamp: new Date().toISOString(),
+    });
+  }
+
   const checks: Record<string, { status: string; message?: string }> = {};
 
   // DB check

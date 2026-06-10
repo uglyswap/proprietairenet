@@ -289,9 +289,12 @@ Deno.serve(async (req: Request) => {
             .maybeSingle();
 
           if (!profile?.is_admin && creditsUsed > 0) {
+            // La fonction SQL attend (user_id_param, credits_amount): les noms de
+            // parametres doivent correspondre exactement, sinon les credits ne sont
+            // jamais debites (enrichissement gratuit).
             const { error: creditError } = await supabase.rpc('deduct_credits', {
-              user_id: contact.user_id,
-              amount: creditsUsed,
+              user_id_param: contact.user_id,
+              credits_amount: creditsUsed,
             });
 
             if (creditError) {

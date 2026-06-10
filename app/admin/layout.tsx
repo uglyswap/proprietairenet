@@ -46,6 +46,16 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
     );
   }
 
+  // Tant que le role admin n'est pas confirme, on ne rend PAS l'UI admin ni les children.
+  // checkAdmin() declenche deja une redirection ; on affiche un ecran d'attente en attendant.
+  if (!user || !user.is_admin) {
+    return (
+      <div className="h-screen flex items-center justify-center">
+        <Loader2 className="h-8 w-8 animate-spin text-primary" />
+      </div>
+    );
+  }
+
   return (
     <div className="h-screen flex overflow-hidden">
       {/* Sidebar */}

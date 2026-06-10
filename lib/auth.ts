@@ -1,6 +1,6 @@
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
-import { query } from './db';
+import { query, withTransaction } from './db';
 import logger from './logger';
 
 function getJwtSecret(): string {
@@ -77,40 +77,46 @@ export async function getUserFromToken(token: string): Promise<AuthUser | null> 
 
 // Register a new user
 export async function registerUser(email: string, password: string, firstName?: string, lastName?: string): Promise<AuthSession> {
-  // Check if user exists
-  const existing = await query('SELECT id FROM users WHERE email = $1', [email.toLowerCase()]);
-  if (existing.rows.length > 0) {
-    throw new Error('Un compte avec cet email existe déjà');
-  }
-
   const passwordHash = await hashPassword(password);
 
-  // Create organization for the user (free plan)
-  const orgResult = await query(
-    `INSERT INTO organizations (name, subscription_plan, max_users, credits_balance, monthly_searches_limit)
-     VALUES ($1, 'free', 1, 10, 10) RETURNING id`,
-    [`Org de ${firstName || email.split('@')[0]}`]
-  );
-  const orgId = orgResult.rows[0].id;
+  // Toutes les ecritures (org, user, owner, credits) dans une seule transaction:
+  // soit tout reussit, soit rollback complet (pas d'org/user orphelin).
+  const { user, orgId } = await withTransaction(async (client) => {
+    // Check if user exists (dans la transaction pour eviter une race d'inscription)
+    const existing = await client.query('SELECT id FROM users WHERE email = $1', [email.toLowerCase()]);
+    if (existing.rows.length > 0) {
+      throw new Error('Un compte avec cet email existe déjà');
+    }
 
-  // Create user
-  const userResult = await query(
-    `INSERT INTO users (email, password_hash, first_name, last_name, role, organization_id, email_verified)
-     VALUES ($1, $2, $3, $4, 'user', $5, TRUE) RETURNING id, email, first_name, last_name, role, is_admin, organization_id`,
-    [email.toLowerCase(), passwordHash, firstName || null, lastName || null, orgId]
-  );
+    // Create organization for the user (free plan)
+    const orgResult = await client.query(
+      `INSERT INTO organizations (name, subscription_plan, max_users, credits_balance, monthly_searches_limit)
+       VALUES ($1, 'free', 1, 10, 10) RETURNING id`,
+      [`Org de ${firstName || email.split('@')[0]}`]
+    );
+    const newOrgId = orgResult.rows[0].id;
 
-  const user = userResult.rows[0];
+    // Create user
+    const userResult = await client.query(
+      `INSERT INTO users (email, password_hash, first_name, last_name, role, organization_id, email_verified)
+       VALUES ($1, $2, $3, $4, 'user', $5, TRUE) RETURNING id, email, first_name, last_name, role, is_admin, organization_id`,
+      [email.toLowerCase(), passwordHash, firstName || null, lastName || null, newOrgId]
+    );
 
-  // Set org owner
-  await query('UPDATE organizations SET owner_id = $1 WHERE id = $2', [user.id, orgId]);
+    const newUser = userResult.rows[0];
 
-  // Log initial credits
-  await query(
-    `INSERT INTO credit_transactions (organization_id, user_id, amount, type, description)
-     VALUES ($1, $2, 10, 'bonus', 'Crédits de bienvenue')`,
-    [orgId, user.id]
-  );
+    // Set org owner
+    await client.query('UPDATE organizations SET owner_id = $1 WHERE id = $2', [newUser.id, newOrgId]);
+
+    // Log initial credits
+    await client.query(
+      `INSERT INTO credit_transactions (organization_id, user_id, amount, type, description)
+       VALUES ($1, $2, 10, 'bonus', 'Crédits de bienvenue')`,
+      [newOrgId, newUser.id]
+    );
+
+    return { user: newUser, orgId: newOrgId };
+  });
 
   const token = generateToken(user);
 
@@ -197,7 +203,7 @@ export async function checkSearchLimit(userId: string, orgId: string, isAdmin: b
   }
 
   const org = await query(
-    'SELECT subscription_plan, monthly_searches_used, monthly_searches_limit FROM organizations WHERE id = $1',
+    'SELECT subscription_plan, monthly_searches_limit FROM organizations WHERE id = $1',
     [orgId]
   );
 
@@ -205,16 +211,26 @@ export async function checkSearchLimit(userId: string, orgId: string, isAdmin: b
     return { allowed: false, remaining: 0, limit: 0, message: 'Organisation non trouvée' };
   }
 
-  const { subscription_plan, monthly_searches_used, monthly_searches_limit } = org.rows[0];
+  const { subscription_plan, monthly_searches_limit } = org.rows[0];
 
   // Paid plans have unlimited searches
   if (subscription_plan !== 'free') {
     return { allowed: true, remaining: 999999, limit: 999999 };
   }
 
-  const remaining = monthly_searches_limit - monthly_searches_used;
+  // Increment atomique avec garde sur la limite: on n'incremente QUE si le quota
+  // n'est pas atteint, dans une seule requete. Evite le TOCTOU du SELECT-puis-UPDATE
+  // qui laissait passer deux recherches concurrentes au-dela de la limite.
+  const updated = await query(
+    `UPDATE organizations
+     SET monthly_searches_used = monthly_searches_used + 1
+     WHERE id = $1 AND monthly_searches_used < monthly_searches_limit
+     RETURNING monthly_searches_used, monthly_searches_limit`,
+    [orgId]
+  );
 
-  if (remaining <= 0) {
+  if (updated.rows.length === 0) {
+    // Aucune ligne mise a jour: la limite etait deja atteinte.
     return {
       allowed: false,
       remaining: 0,
@@ -223,18 +239,16 @@ export async function checkSearchLimit(userId: string, orgId: string, isAdmin: b
     };
   }
 
-  // Increment search counter
-  await query(
-    'UPDATE organizations SET monthly_searches_used = monthly_searches_used + 1 WHERE id = $1',
-    [orgId]
-  );
+  const newUsed = updated.rows[0].monthly_searches_used;
+  const newLimit = updated.rows[0].monthly_searches_limit;
+  const remaining = newLimit - newUsed;
 
   return {
     allowed: true,
-    remaining: remaining - 1,
-    limit: monthly_searches_limit,
-    message: remaining <= 3
-      ? `Il vous reste ${remaining - 1} recherche${remaining - 1 > 1 ? 's' : ''} gratuite${remaining - 1 > 1 ? 's' : ''} ce mois-ci. Passez au plan Starter pour des recherches illimitées !`
+    remaining,
+    limit: newLimit,
+    message: remaining <= 2
+      ? `Il vous reste ${remaining} recherche${remaining > 1 ? 's' : ''} gratuite${remaining > 1 ? 's' : ''} ce mois-ci. Passez au plan Starter pour des recherches illimitées !`
       : undefined,
   };
 }

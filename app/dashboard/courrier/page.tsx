@@ -80,6 +80,9 @@ interface TemplateItem {
   is_default: boolean;
   ai_generated?: boolean;
   category?: string;
+  // Champs alternatifs presents sur les templates curated (vs templates utilisateur).
+  title?: string;
+  content?: string;
 }
 
 const TEMPLATE_CATEGORIES = [
@@ -173,9 +176,13 @@ function CourrierPageContent() {
 
   // Template / content
   const [letterContent, setLetterContent] = useState('');
-  
-  
-  // PDF mode removed - text only
+
+
+  // PDF mode removed - text only.
+  // Etat conserve pour la fonction d'upload PDF historique (handlePdfUpload) afin que
+  // le module compile; le mode PDF n'est plus expose dans l'UI.
+  const [pdfBase64, setPdfBase64] = useState('');
+  const [pdfFileName, setPdfFileName] = useState('');
 
   // Options
   const [affranchissement, setAffranchissement] = useState('verte');
@@ -1030,9 +1037,9 @@ function CourrierPageContent() {
                                 onClick={async () => {
                                   if (confirm('Supprimer ce template ?')) {
                                     try {
-                                      const res = await fetch(`/api/templates/${template.id}`, { 
-                                        method: 'DELETE', 
-                                        headers: getAuthHeaders() 
+                                      const res = await fetch(`/api/courrier/templates?id=${encodeURIComponent(template.id)}`, {
+                                        method: 'DELETE',
+                                        headers: getAuthHeaders()
                                       });
                                       if (res.ok) {
                                         toast.success('Template supprimé');
@@ -1085,36 +1092,36 @@ function CourrierPageContent() {
               ) : (
                 <div className="space-y-4">
                   {history.map(item => (
-                    <div key={item.uid} className="p-4 border border-gray-200 rounded-lg bg-gray-50">
+                    <div key={item.service_postal_uid} className="p-4 border border-gray-200 rounded-lg bg-gray-50">
                       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
                         <div className="space-y-1">
                           <div className="flex items-center gap-2">
-                            <span className="font-medium">{item.recipient}</span>
+                            <span className="font-medium">{item.recipient_name}</span>
                             {getStatusBadge(item.status)}
                           </div>
                           <p className="text-sm text-gray-600">
-                            Type : {getLabel(item.type)} • {new Date(item.created_at).toLocaleDateString('fr-FR')} à {new Date(item.created_at).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })}
+                            Type : {getLabel(item.type_affranchissement)} • {new Date(item.created_at).toLocaleDateString('fr-FR')} à {new Date(item.created_at).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })}
                           </p>
                           <p className="text-sm text-gray-600">
-                            Coût : {item.price} crédits
+                            Coût : {item.prix} crédits
                           </p>
                         </div>
                         <div className="flex items-center gap-2">
                           {!['preview', 'previewed', 'pending'].includes(item.status) && (
-                            <Button 
-                              size="sm" 
+                            <Button
+                              size="sm"
                               variant="outline"
-                              onClick={() => handleTrack(item.uid)}
+                              onClick={() => handleTrack(item.service_postal_uid)}
                             >
                               <Truck className="h-4 w-4 mr-2" />
                               Suivi
                             </Button>
                           )}
                           {['pending', 'preview', 'previewed'].includes(item.status) && (
-                            <Button 
-                              size="sm" 
+                            <Button
+                              size="sm"
                               variant="outline"
-                              onClick={() => handleCancel(item.uid)}
+                              onClick={() => handleCancel(item.service_postal_uid)}
                             >
                               <X className="h-4 w-4 mr-2" />
                               Annuler
@@ -1163,7 +1170,7 @@ function CourrierPageContent() {
               <div>
                 <h4 className="font-semibold mb-3">Destinataires ({(bulkPreviewData.recipients || bulkPreviewData.results || []).length})</h4>
                 <div className="max-h-60 overflow-y-auto space-y-2">
-                  {(bulkPreviewData.recipients || (bulkPreviewData.results || []).map(r => ({ name: r.recipient_name || r.name, address: r.address || "", success: r.success }))).map((recipient, index) => (
+                  {(bulkPreviewData.recipients || (bulkPreviewData.results || []).map((r: any) => ({ name: r.recipient_name || r.name, address: r.address || "", success: r.success }))).map((recipient: any, index: number) => (
                     <div key={index} className="flex items-center gap-3 p-3 bg-gray-50 rounded-lg">
                       {recipient.success ? (
                         <CheckCircle2 className="h-5 w-5 text-green-600 shrink-0" />

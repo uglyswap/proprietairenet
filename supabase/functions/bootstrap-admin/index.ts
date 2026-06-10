@@ -15,6 +15,18 @@ Deno.serve(async (req: Request) => {
   }
 
   try {
+    // Authentification obligatoire: cette fonction cree un compte admin avec
+    // 10000 credits. Sans secret partage configure et fourni, on refuse (fail-closed),
+    // pour empecher toute escalade de privileges par un appelant anonyme.
+    const bootstrapSecret = Deno.env.get('BOOTSTRAP_SECRET');
+    const provided = req.headers.get('x-bootstrap-secret') || '';
+    if (!bootstrapSecret || provided !== bootstrapSecret) {
+      return new Response(
+        JSON.stringify({ error: 'Unauthorized' }),
+        { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
     const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
     const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
     const adminClient = createClient(supabaseUrl, supabaseServiceKey);

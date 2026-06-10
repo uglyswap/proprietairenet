@@ -43,14 +43,16 @@ export async function POST(req: NextRequest) {
       });
       stripeProductId = product.id;
 
-      const price = await stripe.prices.create({
+      // Renomme pour ne pas masquer la variable 'price' du body (sinon TDZ:
+      // 'price' utilise avant sa declaration -> creation de plan payant impossible).
+      const stripePrice = await stripe.prices.create({
         product: product.id,
         unit_amount: price,
         currency: "eur",
         recurring: { interval: "month" },
         tax_behavior: "exclusive",
       });
-      stripePriceId = price.id;
+      stripePriceId = stripePrice.id;
     }
 
     const maxSort = await query("SELECT COALESCE(MAX(sort_order), -1) + 1 as next_sort FROM plans");

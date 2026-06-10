@@ -5,7 +5,20 @@ import logger from "@/lib/logger";
 
 export const dynamic = "force-dynamic";
 
-const resend = new Resend(process.env.RESEND_API_KEY);
+// Init lazy: ne jamais construire Resend au chargement du module (sinon le build
+// echoue si RESEND_API_KEY n'est pas presente au build-time). La cle vient
+// exclusivement de l'environnement (aucun secret en dur).
+let _resend: Resend | null = null;
+function getResend(): Resend | null {
+  if (_resend) return _resend;
+  const key = process.env.RESEND_API_KEY;
+  if (!key) {
+    logger.error('DRIP', 'RESEND_API_KEY non configurée, envoi ignoré');
+    return null;
+  }
+  _resend = new Resend(key);
+  return _resend;
+}
 const FROM_EMAIL = process.env.EMAIL_FROM || "Proprietaire.net <noreply@proprietaire.net>";
 const APP_URL = process.env.NEXT_PUBLIC_APP_URL || "https://proprietaire.net";
 
@@ -259,11 +272,35 @@ export async function GET(req: NextRequest) {
     let failCount = 0;
 
     for (const row of pending.rows) {
+      // Idempotence: claime la ligne de maniere atomique avant l'envoi.
+      // Deux executions concurrentes du cron ne peuvent pas envoyer le meme email :
+      // seule celle qui fait passer 'pending' -> 'sending' obtient rowCount > 0.
+      const claim = await query(
+        `UPDATE drip_email_queue SET status = 'sending' WHERE id = $1 AND status = 'pending' RETURNING id`,
+        [row.id]
+      );
+      if (!claim.rowCount) { continue; }
+
       const emailContent = getDripEmail(row.step, row.first_name, row.user_id);
       if (!emailContent) { await query(`UPDATE drip_email_queue SET status = 'failed' WHERE id = $1`, [row.id]); failCount++; continue; }
+      const resend = getResend();
+      if (!resend) {
+        // Pas de cle configuree: ne pas perdre la ligne, la remettre en attente.
+        await query(`UPDATE drip_email_queue SET status = 'pending' WHERE id = $1`, [row.id]);
+        failCount++;
+        continue;
+      }
       try {
-        const result = await resend.emails.send({ from: FROM_EMAIL, to: row.email, subject: emailContent.subject, html: emailContent.html });
-        await query(`UPDATE drip_email_queue SET status = 'sent', sent_at = now(), resend_message_id = $2 WHERE id = $1`, [row.id, (result as any)?.id || null]);
+        // Resend v4 ne throw PAS sur erreur API : il retourne { data, error }.
+        // On ne marque 'sent' que si error est null/absent.
+        const { data, error } = await resend.emails.send({ from: FROM_EMAIL, to: row.email, subject: emailContent.subject, html: emailContent.html });
+        if (error) {
+          logger.error("DRIP", `Resend rejected step ${row.step} to ${row.email}`, { error: error.message, name: error.name });
+          await query(`UPDATE drip_email_queue SET status = 'failed' WHERE id = $1`, [row.id]);
+          failCount++;
+          continue;
+        }
+        await query(`UPDATE drip_email_queue SET status = 'sent', sent_at = now(), resend_message_id = $2 WHERE id = $1`, [row.id, data?.id || null]);
         sentCount++;
       } catch (sendErr: any) {
         logger.error("DRIP", `Failed step ${row.step} to ${row.email}`, { error: sendErr.message });

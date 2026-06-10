@@ -1,14 +1,15 @@
 import { Resend } from 'resend';
 
-// Lazy init to avoid build-time errors
+// Lazy init to avoid build-time errors.
+// Si la cle est absente, on lance une erreur explicite plutot qu'un stub qui
+// simule un succes: les appelants (try/catch) renverront false, et on ne pretend
+// jamais avoir envoye un email (ex: reinitialisation de mot de passe) qui ne part pas.
 let _resend: Resend | null = null;
 function getResend(): Resend {
   if (!_resend) {
     const key = process.env.RESEND_API_KEY;
     if (!key) {
-      console.warn('[EMAIL] RESEND_API_KEY not set — emails will fail silently');
-      // Return a stub that won't crash
-      return { emails: { send: async () => ({ id: 'stub' }) } } as any;
+      throw new Error('[EMAIL] RESEND_API_KEY non configuree');
     }
     _resend = new Resend(key);
   }

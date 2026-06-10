@@ -59,7 +59,9 @@ export async function createCheckoutSession(params: {
     tax_id_collection: { enabled: true },
     customer_update: { name: "auto", address: "auto" },
     allow_promotion_codes: true,
-    invoice_settings: { custom_fields: [{ name: "Produit", value: "Proprietaire.net - Abonnement Pro" }] },
+    // Note: 'invoice_settings' n'est pas un parametre valide de checkout.sessions.create
+    // (l'API Stripe le rejette a l'execution et il cassait le typecheck). Le libelle
+    // produit doit etre porte par le Product/Price Stripe, pas ici.
   });
 }
 
@@ -114,22 +116,32 @@ export async function updatePlan(planId: string, data: Partial<{
   name: string; description: string; price_ht: number; monthly_searches_limit: number;
   included_users: number; extra_user_price: number; features: string[]; is_active: boolean; sort_order: number;
 }>) {
+  // Whitelist stricte des colonnes modifiables: les noms de colonnes ne peuvent
+  // pas etre parametres en SQL, donc on n'interpole QUE des identifiants connus.
+  // Toute cle hors de cette liste (ex: injectee via le body de la requete) est ignoree.
+  const ALLOWED_COLUMNS = new Set([
+    "name", "description", "price_ht", "monthly_searches_limit",
+    "included_users", "extra_user_price", "features", "is_active", "sort_order",
+  ]);
+
   const sets: string[] = [];
   const values: any[] = [];
   let idx = 1;
 
   for (const [key, value] of Object.entries(data)) {
-    if (value !== undefined) {
-      if (key === "features") {
-        sets.push(`${key} = $${idx}::jsonb`);
-        values.push(JSON.stringify(value));
-      } else {
-        sets.push(`${key} = $${idx}`);
-        values.push(value);
-      }
-      idx++;
+    if (value === undefined) continue;
+    if (!ALLOWED_COLUMNS.has(key)) continue; // anti-injection d'identifiant SQL
+    if (key === "features") {
+      sets.push(`features = $${idx}::jsonb`);
+      values.push(JSON.stringify(value));
+    } else {
+      sets.push(`${key} = $${idx}`);
+      values.push(value);
     }
+    idx++;
   }
+
+  if (sets.length === 0) return; // rien a mettre a jour
   sets.push("updated_at = now()");
   values.push(planId);
 
