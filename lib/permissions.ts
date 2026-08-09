@@ -1,4 +1,4 @@
-import { query } from './db';
+import { query, getColonnes } from './db';
 import { NextResponse } from 'next/server';
 import { ApiAuthResult } from './api-auth';
 
@@ -22,8 +22,17 @@ export type Permission = (typeof ALL_PERMISSIONS)[number];
  * Falls back to mapping old 'role' column values.
  */
 export async function getUserRoleLevel(userId: string): Promise<string> {
+  // users.role_level fait partie des colonnes attendues par le code et absentes
+  // de la production. La selectionner sans precaution leve un 42703 qui
+  // remontait en HTTP 500 pour tout membre non proprietaire de son
+  // organisation. On se rabat alors sur la colonne `role`, qui existe.
+  const colonnes = await getColonnes('users');
+  const aRoleLevel = colonnes.has('role_level');
+
   const result = await query(
-    'SELECT role_level, role FROM users WHERE id = $1',
+    aRoleLevel
+      ? 'SELECT role_level, role FROM users WHERE id = $1'
+      : 'SELECT NULL::text AS role_level, role FROM users WHERE id = $1',
     [userId]
   );
   if (result.rows.length === 0) return 'viewer';

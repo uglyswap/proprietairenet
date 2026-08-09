@@ -392,7 +392,13 @@ export default function ResultsList({ results, onExport, onReveal, onCreditsUpda
       return s.length > 0 && /^[=+\-@\t\r]/.test(s) ? `'${s}` : s
     }
     const esc = (s: unknown) => `"${sanitizeCsvCell(s).replace(/"/g, '""')}"`
-    const headers = ['Dénomination','Forme Juridique','SIREN','Type','Adresse','Code Postal','Ville','Réf Cadastrale','Type Bien','Surface Parcelle','Surface Bâtie','Prix/m²','Année Construction'].join(sep)
+    const headers = [
+      'Dénomination','Forme Juridique','SIREN','Type',
+      'Adresse','Code Postal','Ville',
+      'Réf Cadastrale','IDU','Surface Parcelle (m²)',
+      'Dernière vente (date)','Dernière vente (€)','Nature mutation','Prix/m²',
+      'Nb transactions','Type Bien','Surface Bâtie','Année Construction','Copropriété'
+    ].join(sep)
     const row = [
       esc(result.proprietaire.denomination),
       esc(result.proprietaire.forme_juridique || ''),
@@ -402,11 +408,17 @@ export default function ResultsList({ results, onExport, onReveal, onCreditsUpda
       sanitizeCsvCell(prop?.code_postal || ''),
       esc(prop?.ville || ''),
       sanitizeCsvCell(prop?.reference_cadastrale || ''),
-      esc(e.type_bien || ''),
+      sanitizeCsvCell((prop as any)?.idu || ''),
       sanitizeCsvCell(e.surface_parcelle || ''),
-      sanitizeCsvCell(e.surface_batie || ''),
+      sanitizeCsvCell(e.derniere_vente?.date || e.date_derniere_transaction || ''),
+      sanitizeCsvCell(e.derniere_vente?.prix ?? e.prix_derniere_vente ?? ''),
+      esc(e.derniere_vente?.nature || ''),
       sanitizeCsvCell(e.prix_m2 || ''),
-      sanitizeCsvCell(e.annee_construction || '')
+      sanitizeCsvCell(e.nb_transactions ?? ''),
+      esc(e.type_bien || ''),
+      sanitizeCsvCell(e.surface_batie || ''),
+      sanitizeCsvCell(e.annee_construction || ''),
+      e.est_copropriete ? 'Oui' : 'Non'
     ].join(sep)
     const bom = '\uFEFF'
     const blob = new Blob([bom + headers + '\n' + row], { type: 'text/csv;charset=utf-8' })
@@ -645,17 +657,165 @@ export default function ResultsList({ results, onExport, onReveal, onCreditsUpda
                     </div>
                   )}
 
-                  {/* Bloc 4 : Transactions DVF */}
-                  {enrichissement && (enrichissement.prix_m2 || enrichissement.nb_transactions > 0) && (
-                    <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-2 text-xs bg-indigo-50 dark:bg-indigo-950/30 p-3 rounded-lg">
-                      <div className="col-span-2 font-medium text-indigo-900 dark:text-indigo-200 flex items-center gap-1 text-xs mb-1">
-                        <Euro className="h-3 w-3" /> 📈 Transactions DVF
+                  {/* Bloc 4 : Parcelle cadastrale */}
+                  {(() => {
+                    const parcelles = (result.proprietes || []).filter((p: any) => p.idu || p.reference_cadastrale)
+                    if (parcelles.length === 0) return null
+                    return (
+                      <div className="mt-2 text-xs bg-slate-50 dark:bg-slate-900/40 p-3 rounded-lg">
+                        <div className="font-medium text-slate-900 dark:text-slate-200 flex items-center gap-1 text-xs mb-2">
+                          <MapPin className="h-3 w-3" /> 📐 Parcelle{parcelles.length > 1 ? 's' : ''} cadastrale{parcelles.length > 1 ? 's' : ''}
+                        </div>
+                        <div className="space-y-1.5">
+                          {parcelles.slice(0, 5).map((p: any, i: number) => (
+                            <div key={i} className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5">
+                              <span className="font-mono text-[11px] font-semibold">
+                                {p.reference_cadastrale || p.idu}
+                              </span>
+                              {p.idu && (
+                                <span className="text-muted-foreground text-[10px] font-mono">IDU {p.idu}</span>
+                              )}
+                              {p.surface_parcelle_m2 ? (
+                                <span className="text-muted-foreground">
+                                  {p.surface_parcelle_m2.toLocaleString()} m²
+                                </span>
+                              ) : null}
+                              {p.code_postal && (
+                                <span className="text-muted-foreground">{p.code_postal} {p.ville}</span>
+                              )}
+                            </div>
+                          ))}
+                          {parcelles.length > 5 && (
+                            <div className="text-muted-foreground">
+                              et {parcelles.length - 5} autre{parcelles.length - 5 > 1 ? 's' : ''}
+                            </div>
+                          )}
+                        </div>
                       </div>
-                      {enrichissement.prix_m2 && <div><span className="text-muted-foreground">Prix/m² :</span> <span className="font-semibold text-indigo-700 dark:text-indigo-400">{enrichissement.prix_m2.toLocaleString()} €{enrichissement.type_transaction ? ` (${enrichissement.type_transaction})` : ''}</span></div>}
-                      {enrichissement.surface_lots_carrez && <div><span className="text-muted-foreground">Surface Carrez :</span> {enrichissement.surface_lots_carrez.toLocaleString()} m²</div>}
-                      {enrichissement.date_derniere_transaction && <div><span className="text-muted-foreground">Dernière vente :</span> {enrichissement.date_derniere_transaction}</div>}
-                      {enrichissement.nb_transactions > 0 && (
-                        <div><span className="text-muted-foreground">Transactions :</span> {enrichissement.nb_transactions} depuis {enrichissement.premiere_transaction_annee || 2010}</div>
+                    )
+                  })()}
+
+                  {/* Bloc 5 : Dernière vente enregistrée (DVF) */}
+                  {enrichissement && (enrichissement.derniere_vente || enrichissement.prix_m2 || enrichissement.nb_transactions > 0) && (
+                    <div className="mt-2 text-xs bg-indigo-50 dark:bg-indigo-950/30 p-3 rounded-lg">
+                      <div className="font-medium text-indigo-900 dark:text-indigo-200 flex items-center gap-1 text-xs mb-2">
+                        <Euro className="h-3 w-3" /> 📈 Valeurs foncières (DVF)
+                      </div>
+
+                      {enrichissement.derniere_vente ? (
+                        <div className="mb-2">
+                          <div className="flex flex-wrap items-baseline gap-x-2">
+                            <span className="text-muted-foreground">Dernière vente :</span>
+                            <span className="text-base font-bold text-indigo-700 dark:text-indigo-300">
+                              {Number(enrichissement.derniere_vente.prix).toLocaleString('fr-FR')} €
+                            </span>
+                            {enrichissement.derniere_vente.date && (
+                              <span className="text-muted-foreground">
+                                le {new Date(enrichissement.derniere_vente.date).toLocaleDateString('fr-FR')}
+                              </span>
+                            )}
+                          </div>
+                          <div className="mt-1 flex flex-wrap gap-1.5">
+                            {enrichissement.derniere_vente.nature && (
+                              <Badge variant="secondary" className="text-[10px] px-1.5 py-0">
+                                {enrichissement.derniere_vente.nature}
+                              </Badge>
+                            )}
+                            {enrichissement.derniere_vente.type_local && (
+                              <Badge variant="secondary" className="text-[10px] px-1.5 py-0">
+                                {enrichissement.derniere_vente.type_local}
+                              </Badge>
+                            )}
+                            {enrichissement.derniere_vente.foncier_nu && (
+                              <Badge variant="outline" className="text-[10px] px-1.5 py-0">
+                                Terrain nu
+                              </Badge>
+                            )}
+                            {enrichissement.derniere_vente.prix_partage && (
+                              // Le prix DVF couvre la mutation entiere : quand elle
+                              // porte sur plusieurs parcelles, il n'est pas imputable
+                              // a celle-ci seule. Le dire plutot que d'induire en erreur.
+                              <Badge variant="outline" className="text-[10px] px-1.5 py-0 border-amber-500 text-amber-700 dark:text-amber-400">
+                                Prix portant sur plusieurs parcelles
+                              </Badge>
+                            )}
+                          </div>
+                        </div>
+                      ) : null}
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1">
+                        {enrichissement.prix_m2 ? (
+                          <div>
+                            <span className="text-muted-foreground">Prix au m² :</span>{' '}
+                            <span className="font-semibold text-indigo-700 dark:text-indigo-400">
+                              {Number(enrichissement.prix_m2).toLocaleString('fr-FR')} €
+                            </span>
+                          </div>
+                        ) : null}
+                        {enrichissement.derniere_vente?.surface_bati ? (
+                          <div>
+                            <span className="text-muted-foreground">Surface bâtie vendue :</span>{' '}
+                            {Number(enrichissement.derniere_vente.surface_bati).toLocaleString('fr-FR')} m²
+                          </div>
+                        ) : null}
+                        {enrichissement.derniere_vente?.surface_terrain ? (
+                          <div>
+                            <span className="text-muted-foreground">Terrain :</span>{' '}
+                            {Number(enrichissement.derniere_vente.surface_terrain).toLocaleString('fr-FR')} m²
+                          </div>
+                        ) : null}
+                        {enrichissement.derniere_vente?.nombre_pieces ? (
+                          <div>
+                            <span className="text-muted-foreground">Pièces :</span>{' '}
+                            {enrichissement.derniere_vente.nombre_pieces}
+                          </div>
+                        ) : null}
+                        {enrichissement.nb_transactions > 0 && (
+                          <div>
+                            <span className="text-muted-foreground">Transactions connues :</span>{' '}
+                            {enrichissement.nb_transactions}
+                            {enrichissement.premiere_transaction
+                              ? ` depuis ${String(enrichissement.premiere_transaction).slice(0, 4)}`
+                              : ''}
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Historique */}
+                      {Array.isArray(enrichissement.historique_ventes) &&
+                        enrichissement.historique_ventes.length > 1 && (
+                          <div className="mt-2 border-t border-indigo-200 dark:border-indigo-900 pt-2">
+                            <div className="text-muted-foreground mb-1">Historique des ventes</div>
+                            <div className="space-y-0.5">
+                              {enrichissement.historique_ventes
+                                .slice(0, 6)
+                                .map((v: any, i: number) => (
+                                  <div key={i} className="flex flex-wrap items-baseline gap-x-2">
+                                    <span className="font-mono text-[11px]">
+                                      {v.date ? new Date(v.date).toLocaleDateString('fr-FR') : '—'}
+                                    </span>
+                                    <span className="font-semibold">
+                                      {Number(v.prix).toLocaleString('fr-FR')} €
+                                    </span>
+                                    {v.prix_m2 ? (
+                                      <span className="text-muted-foreground">
+                                        {Number(v.prix_m2).toLocaleString('fr-FR')} €/m²
+                                      </span>
+                                    ) : null}
+                                    {v.nature && (
+                                      <span className="text-muted-foreground text-[10px]">{v.nature}</span>
+                                    )}
+                                  </div>
+                                ))}
+                            </div>
+                          </div>
+                        )}
+
+                      {/* Une source indisponible n'est pas une absence de donnee. */}
+                      {enrichissement.sources && enrichissement.sources.dvf === false && (
+                        <div className="mt-2 text-[11px] text-amber-700 dark:text-amber-400">
+                          Données de ventes temporairement indisponibles.
+                        </div>
                       )}
                     </div>
                   )}

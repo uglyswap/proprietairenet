@@ -1,6 +1,6 @@
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
-import { query, withTransaction } from './db';
+import { query, withTransaction, getColonnes } from './db';
 import logger from './logger';
 
 function getJwtSecret(): string {
@@ -218,24 +218,58 @@ export async function checkSearchLimit(userId: string, orgId: string, isAdmin: b
     return { allowed: true, remaining: 999999, limit: 999999 };
   }
 
-  // Increment atomique avec garde sur la limite: on n'incremente QUE si le quota
-  // n'est pas atteint, dans une seule requete. Evite le TOCTOU du SELECT-puis-UPDATE
-  // qui laissait passer deux recherches concurrentes au-dela de la limite.
-  const updated = await query(
-    `UPDATE organizations
-     SET monthly_searches_used = monthly_searches_used + 1
-     WHERE id = $1 AND monthly_searches_used < monthly_searches_limit
-     RETURNING monthly_searches_used, monthly_searches_limit`,
-    [orgId]
-  );
+  // RAZ MENSUELLE PARESSEUSE + increment atomique, en une seule requete.
+  //
+  // Le quota dit "mensuel" etait en realite un quota A VIE. La fonction
+  // reset_monthly_searches() existe bien en base mais n'est appelee par
+  // personne : ni pg_cron, ni endpoint, ni aucune occurrence de son nom dans
+  // les deux depots. Un compte atteignant sa limite etait donc bloque
+  // definitivement, pendant que l'interface lui affichait "ce mois-ci".
+  //
+  // Plutot que de rebrancher un ordonnanceur qu'on peut oublier a nouveau, la
+  // remise a zero est integree au chemin de consommation : elle devient
+  // structurellement impossible a oublier, puisqu'elle s'execute a la premiere
+  // recherche de chaque nouvelle periode.
+  //
+  // La colonne monthly_searches_reset_at fait partie des colonnes absentes de
+  // la production : sans elle, on conserve le comportement precedent plutot que
+  // d'echouer (cf. migrations/005_quota_mensuel.sql).
+  const colonnesOrg = await getColonnes('organizations');
+  const aColonneReset = colonnesOrg.has('monthly_searches_reset_at');
+
+  const sqlIncrement = aColonneReset
+    ? `UPDATE organizations
+          SET monthly_searches_used = CASE
+                WHEN monthly_searches_reset_at IS NULL
+                  OR monthly_searches_reset_at < date_trunc('month', now())
+                THEN 1
+                ELSE monthly_searches_used + 1 END,
+              monthly_searches_reset_at = CASE
+                WHEN monthly_searches_reset_at IS NULL
+                  OR monthly_searches_reset_at < date_trunc('month', now())
+                THEN date_trunc('month', now())
+                ELSE monthly_searches_reset_at END
+        WHERE id = $1
+          AND (
+                monthly_searches_reset_at IS NULL
+             OR monthly_searches_reset_at < date_trunc('month', now())
+             OR monthly_searches_used < monthly_searches_limit
+          )
+        RETURNING monthly_searches_used, monthly_searches_limit`
+    : `UPDATE organizations
+          SET monthly_searches_used = monthly_searches_used + 1
+        WHERE id = $1 AND monthly_searches_used < monthly_searches_limit
+        RETURNING monthly_searches_used, monthly_searches_limit`;
+
+  const updated = await query(sqlIncrement, [orgId]);
 
   if (updated.rows.length === 0) {
-    // Aucune ligne mise a jour: la limite etait deja atteinte.
+    // Aucune ligne mise a jour: la limite de la periode en cours est atteinte.
     return {
       allowed: false,
       remaining: 0,
       limit: monthly_searches_limit,
-      message: `Vous avez atteint votre limite de ${monthly_searches_limit} recherches gratuites ce mois-ci. Passez au plan Starter pour des recherches illimitées !`,
+      message: `Vous avez atteint votre limite de ${monthly_searches_limit} recherches gratuites ce mois-ci. Passez a l'offre Pro pour des recherches illimitees.`,
     };
   }
 
@@ -248,7 +282,7 @@ export async function checkSearchLimit(userId: string, orgId: string, isAdmin: b
     remaining,
     limit: newLimit,
     message: remaining <= 2
-      ? `Il vous reste ${remaining} recherche${remaining > 1 ? 's' : ''} gratuite${remaining > 1 ? 's' : ''} ce mois-ci. Passez au plan Starter pour des recherches illimitées !`
+      ? `Il vous reste ${remaining} recherche${remaining > 1 ? 's' : ''} gratuite${remaining > 1 ? 's' : ''} ce mois-ci. Passez a l'offre Pro pour des recherches illimitees.`
       : undefined,
   };
 }

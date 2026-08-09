@@ -1,5 +1,6 @@
 import Stripe from "stripe";
-import { query } from "./db";
+import { query, getColonnes } from "./db";
+import { crediterCreditsAutonome } from "./credits";
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "", {
   apiVersion: "2023-10-16" as any,
@@ -86,13 +87,46 @@ export async function createPortalSession(customerId: string, returnUrl: string)
   return stripe.billingPortal.sessions.create({ customer: customerId, return_url: returnUrl });
 }
 
+/**
+ * Valeurs acceptees par organizations_subscription_plan_check.
+ *
+ * Deux referentiels de plans coexistent sans point de contact : `plans.slug`
+ * vaut 'gratuit' et 'pro', tandis que `organizations.subscription_plan` est
+ * contraint a 'free', 'starter', 'pro' ou 'enterprise'. Activer un abonnement
+ * sur le plan 'gratuit' violait donc la contrainte, en HTTP 500, et toutes les
+ * jointures entre les deux tables etaient vides (MRR affiche a 0).
+ *
+ * On normalise ici plutot que de laisser remonter une violation de contrainte.
+ */
+const PLANS_AUTORISES = new Set(['free', 'starter', 'pro', 'enterprise']);
+
+const ALIAS_PLANS: Record<string, string> = {
+  gratuit: 'free',
+  freemium: 'free',
+  professionnel: 'pro',
+};
+
+export function normaliserPlanSlug(slug: string): string {
+  const normalise = ALIAS_PLANS[slug] ?? slug;
+  if (!PLANS_AUTORISES.has(normalise)) {
+    throw new Error(
+      `Plan "${slug}" incompatible avec organizations_subscription_plan_check ` +
+        `(valeurs acceptees : ${[...PLANS_AUTORISES].join(', ')})`
+    );
+  }
+  return normalise;
+}
+
 export async function activateSubscription(orgId: string, subscriptionId: string, planSlug: string) {
   const plan = await getPlanBySlug(planSlug);
   if (!plan) throw new Error("Plan not found: " + planSlug);
+
+  const slugCanonique = normaliserPlanSlug(planSlug);
+
   await query(
     `UPDATE organizations SET subscription_plan = $1, stripe_subscription_id = $2,
      monthly_searches_limit = $3, max_users = $4, updated_at = now() WHERE id = $5`,
-    [planSlug, subscriptionId, plan.monthly_searches_limit, plan.included_users, orgId]
+    [slugCanonique, subscriptionId, plan.monthly_searches_limit, plan.included_users, orgId]
   );
 }
 
@@ -104,12 +138,63 @@ export async function cancelSubscription(orgId: string) {
   );
 }
 
-export async function addCredits(orgId: string, userId: string, credits: number, description: string) {
-  await query("UPDATE organizations SET credits_balance = credits_balance + $1, updated_at = now() WHERE id = $2", [credits, orgId]);
-  await query(
-    "INSERT INTO credit_transactions (organization_id, user_id, amount, type, description) VALUES ($1, $2, $3, $4, $5)",
-    [orgId, userId, credits, "purchase", description]
+/**
+ * Cree des credits a la suite d'un achat.
+ *
+ * L'ancienne version enchainait deux requetes hors transaction : une coupure
+ * entre les deux laissait un solde credite sans ligne de journal, ou l'inverse.
+ * Tout passe desormais par lib/credits, qui ecrit le solde et le journal dans
+ * la meme transaction et refuse de rejouer une reference deja traitee.
+ */
+export async function addCredits(
+  orgId: string,
+  userId: string,
+  credits: number,
+  description: string,
+  options: { reference?: string; montantEurCentimes?: number } = {}
+) {
+  await crediterCreditsAutonome({
+    organizationId: orgId,
+    userId,
+    montant: credits,
+    type: 'purchase',
+    description,
+    reference: options.reference,
+    montantEurCentimes: options.montantEurCentimes,
+  });
+}
+
+/**
+ * Retrouve le plan correspondant a un identifiant de prix Stripe.
+ *
+ * Le tunnel d'achat propose un tarif annuel (`stripe_annual_price_id`) mais le
+ * webhook ne cherchait que dans `stripe_price_id` : un abonnement annuel etait
+ * encaisse par Stripe et jamais active dans le produit. Le client payait un an
+ * et n'obtenait rien.
+ *
+ * La colonne annuelle fait partie des colonnes attendues par le code et absentes
+ * de la production : on ne l'interroge que si elle existe.
+ */
+export async function findPlanByStripePriceId(priceId: string) {
+  if (!priceId) return null;
+
+  const colonnes = await getColonnes('plans');
+  const aColonneAnnuelle = colonnes.has('stripe_annual_price_id');
+
+  const result = await query(
+    aColonneAnnuelle
+      ? `SELECT *, (stripe_annual_price_id = $1) AS est_annuel
+           FROM plans
+          WHERE stripe_price_id = $1 OR stripe_annual_price_id = $1
+          LIMIT 1`
+      : `SELECT *, false AS est_annuel
+           FROM plans
+          WHERE stripe_price_id = $1
+          LIMIT 1`,
+    [priceId]
   );
+
+  return result.rows[0] || null;
 }
 
 export async function updatePlan(planId: string, data: Partial<{

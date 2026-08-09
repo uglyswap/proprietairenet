@@ -21,10 +21,19 @@ export interface ApiAuthResult {
 // { checkSearch: true } (cf. app/api/cadastre/search et /geographic). Oublier ce
 // flag laisse la recherche illimitee de fait: c'est une decision a faire par route,
 // pas un defaut applique partout (certaines routes lisent sans consommer de quota).
+export interface AuthOutcome {
+  auth: ApiAuthResult | null;
+  error?: string;
+  status?: number;
+  upgrade_required?: boolean;
+  /** Detail du quota quand le refus vient de la limite de recherches. */
+  quota?: ApiAuthResult['searchCheck'];
+}
+
 export async function authenticateRequest(
   req: NextRequest,
   options: { checkSearch?: boolean } = {}
-): Promise<{ auth: ApiAuthResult | null; error?: string; status?: number; upgrade_required?: boolean }> {
+): Promise<AuthOutcome> {
   const authHeader = req.headers.get('authorization');
   const cookieToken = req.cookies.get('auth-token')?.value;
   const token = authHeader?.replace('Bearer ', '') || cookieToken;
@@ -46,11 +55,22 @@ export async function authenticateRequest(
     result.searchCheck = searchCheck;
 
     if (!searchCheck.allowed) {
+      // `auth` est desormais null quand le quota refuse.
+      //
+      // Cette fonction renvoyait `auth: result`, donc une valeur non-null, avec
+      // un status 403. Or les deux routes appelantes testent `if (!auth)` : la
+      // condition etait toujours fausse, le 403 n'etait jamais renvoye et le
+      // quota de recherches n'a jamais bloque personne depuis la mise en
+      // service. Renvoyer null est ce qui rend le garde effectif.
+      //
+      // `quota` porte le detail pour que l'appelant puisse afficher l'upsell
+      // sans avoir besoin de l'objet d'authentification.
       return {
-        auth: result,
+        auth: null,
         error: searchCheck.message || 'Limite de recherches atteinte',
         status: 403,
         upgrade_required: true,
+        quota: searchCheck,
       };
     }
   }

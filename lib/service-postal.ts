@@ -22,20 +22,25 @@ export async function spFetch(path: string, options: RequestInit = {}): Promise<
   return fetch(url, { ...options, headers });
 }
 
-// Credit costs per affranchissement type (1 credit = 0.01€)
-// Based on Service Postal real prices + 1€ HT margin + 20% TVA
-export const CREDIT_COSTS: Record<string, number> = {
-  verte: 410,
-  vertesuivi: 490,
-  performance: 520,
-  perfsuivi: 600,
-  lr: 1080,
-  lrar: 1250,
-};
+/**
+ * Bareme des credits.
+ *
+ * Ces six nombres etaient la source de verite tarifaire, avec la marge deja
+ * fondue dedans et invisible. Le calcul vit desormais dans lib/pricing.ts, qui
+ * decompose cout prestataire, marge et TVA. Les valeurs produites sont
+ * identiques : ce deplacement ne change aucun prix.
+ *
+ * Ces exports sont conserves pour les appelants existants. Preferer
+ * `calculerTarif` de lib/pricing, qui retourne la decomposition complete.
+ */
+export { getCreditCost, TYPES_AFFRANCHISSEMENT } from './pricing';
 
-export function getCreditCost(type_affranchissement: string): number {
-  return CREDIT_COSTS[type_affranchissement] || 410;
-}
+import { baremeComplet } from './pricing';
+
+/** Bareme en credits, calcule et non plus code en dur. */
+export const CREDIT_COSTS: Record<string, number> = Object.fromEntries(
+  baremeComplet().map((tarif) => [tarif.type_affranchissement, tarif.credits])
+);
 
 /**
  * Generate a CSV for Service Postal publipostage from recipient data.

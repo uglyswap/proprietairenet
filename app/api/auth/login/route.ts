@@ -7,9 +7,19 @@ export const dynamic = 'force-dynamic';
 
 export async function POST(req: NextRequest) {
   try {
-    // Rate limiting
+    // Le corps est lu AVANT le controle de debit pour pouvoir fournir l'adresse
+    // email comme discriminant. Sans elle, et quand l'IP n'est pas resoluble,
+    // tous les appelants partageaient le meme compteur : cinq echecs bloquaient
+    // la connexion de tous les utilisateurs pendant quinze minutes.
+    const body = await req.json();
+    const { email, password } = body;
+
+    if (!email || !password) {
+      return NextResponse.json({ error: 'Email et mot de passe requis' }, { status: 400 });
+    }
+
     const ip = getClientIP(req);
-    const rateCheck = checkRateLimit(ip, 'login');
+    const rateCheck = checkRateLimit(ip, 'login', String(email));
     if (!rateCheck.allowed) {
       logger.warn('AUTH', `Rate limit exceeded for login`, { ip, retryAfter: rateCheck.retryAfter });
       return NextResponse.json(
@@ -18,20 +28,16 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const body = await req.json();
-    const { email, password } = body;
-
-    if (!email || !password) {
-      return NextResponse.json({ error: 'Email et mot de passe requis' }, { status: 400 });
-    }
-
     const session = await loginUser(email, password);
 
     // Audit: log login
     try {
       const { query: dbQuery } = require('@/lib/db');
+      // getClientIP n'honore x-forwarded-for que derriere un proxy declare de
+      // confiance. Lire ce header sans condition, comme ici auparavant, rendait
+      // toutes les adresses IP du journal d'audit falsifiables par le client.
       dbQuery('INSERT INTO audit_log (organization_id, user_id, user_email, action, ip_address) VALUES ($1, $2, $3, $4, $5)',
-        [session.user.organization_id, session.user.id, session.user.email, 'auth.login', req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() || 'unknown']
+        [session.user.organization_id, session.user.id, session.user.email, 'auth.login', ip]
       ).catch(() => {});
     } catch {}
 

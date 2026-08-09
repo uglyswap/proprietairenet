@@ -1,61 +1,189 @@
+/**
+ * Envoi d'un courrier unitaire.
+ *
+ * LA SEQUENCE ETAIT UNE BOMBE, ELLE EST DESORMAIS ORDONNEE
+ *
+ * Ancienne sequence, et ce qu'elle produisait une fois les colonnes ajoutees :
+ *   :89  SELECT des colonnes sender_* -> echouait AVANT tout, donc inoffensif
+ *   :105 debit atomique des credits
+ *   :166 appel Service Postal        -> le courrier est imprime et poste
+ *   :194 mailSent = true
+ *   :205 INSERT mail_history         -> levait TOUJOURS (recipient NOT NULL)
+ *   :243 if (refund && !mailSent)    -> faux, donc AUCUN remboursement
+ *
+ * Ajouter les colonnes sender_* sans corriger mail_history deplacait le point
+ * de rupture APRES le debit et APRES la mise a la poste : credits debites,
+ * courrier physiquement parti, erreur 500 a l'ecran invitant l'utilisateur a
+ * recliquer donc a poster un second pli facture, et aucune trace en base.
+ *
+ * La sequence est maintenant decoupee en trois phases explicites :
+ *
+ *   PHASE 1 - PRE-ENVOI, transactionnelle et entierement annulable.
+ *             Validation, tarification, resolution de l'expediteur, debit.
+ *             Tout echec ici n'a aucune consequence : rien n'est parti.
+ *
+ *   PHASE 2 - ENVOI. Point de non-retour unique et identifie.
+ *             Un echec ici rembourse integralement.
+ *
+ *   PHASE 3 - POST-ENVOI, best-effort. Historique, CRM, correlation.
+ *             Un echec ici ne rembourse JAMAIS et ne fait JAMAIS echouer la
+ *             reponse : le courrier est parti, l'argent est du. Les echecs
+ *             sont remontes en avertissements et journalises pour rattrapage.
+ *
+ * Le debit ecrit sa ligne de journal dans la meme transaction : meme si toute
+ * la phase 3 echoue, le mouvement d'argent reste trace.
+ */
+
 import { NextRequest, NextResponse } from "next/server";
+import { randomUUID } from "node:crypto";
 import { authenticateRequest, isAdminUser } from "@/lib/api-auth";
-import { query } from "@/lib/db";
-import { getCreditCost } from "@/lib/service-postal";
+import { checkPermission } from "@/lib/permissions";
+import { query, withTransaction, getColonnes } from "@/lib/db";
+import { calculerTarif, TarificationError, DecompositionTarifaire } from "@/lib/pricing";
+import {
+  chargerOrganisationPourExpedition,
+  resoudreExpediteur,
+  messageExpediteurIncomplet,
+  validerDestinataire,
+  AdresseExpedition,
+} from "@/lib/expediteur";
+import {
+  debiterCredits,
+  crediterCredits,
+  CreditsInsuffisantsError,
+} from "@/lib/credits";
 
 export const dynamic = "force-dynamic";
 
 const SP_API_URL = process.env.SERVICE_POSTAL_API_URL || "https://prod-api.servicepostal.com";
 const SP_API_KEY = process.env.SERVICE_POSTAL_API_KEY || "";
+const SP_TIMEOUT_MS = 60000;
 
-// Auto-create CRM contact from mail destinataire data
-async function autoCreateContact(orgId: string, userId: string, dest: any) {
-  try {
-    const existing = await query(
-      `SELECT id FROM contacts WHERE organization_id = $1 AND (
-        (company_name IS NOT NULL AND company_name = $2 AND company_name != '') OR
-        (address IS NOT NULL AND address = $3 AND postal_code = $4 AND address != '')
-      ) LIMIT 1`,
-      [orgId, dest.nom_societe || '', dest.adresse_ligne1 || '', dest.code_postal || '']
-    );
+/**
+ * Enregistre le pli dans l'historique.
+ * L'insert ne nomme que des colonnes reellement presentes : `couleur`,
+ * `recto_verso` et `expediteur` sont attendues par le code et absentes de la
+ * production, et `recipient` est NOT NULL sans jamais avoir ete fournie.
+ */
+async function enregistrerHistorique(params: {
+  userId: string;
+  organizationId: string;
+  uid: string;
+  destinataire: Record<string, unknown>;
+  expediteur: AdresseExpedition;
+  typeAffranchissement: string;
+  couleur: string;
+  rectoVerso: string;
+  prix: number;
+  creditsUtilises: number;
+}): Promise<void> {
+  const existantes = await getColonnes("mail_history");
 
-    if (existing.rows.length > 0) {
-      await query(
-        "UPDATE contacts SET mail_count = mail_count + 1, last_contacted_at = now(), updated_at = now() WHERE id = $1",
-        [existing.rows[0].id]
-      );
-      return;
-    }
+  const libelleDestinataire =
+    [params.destinataire.nom_societe, params.destinataire.prenom, params.destinataire.nom]
+      .filter(Boolean)
+      .join(" ")
+      .trim() ||
+    String(params.destinataire.adresse_ligne1 || "Destinataire inconnu");
 
-    await query(
-      `INSERT INTO contacts (
-        organization_id, user_id, civilite, first_name, last_name, company_name,
-        address, postal_code, city,
-        status, mail_count, last_contacted_at
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'contacted',1,now())`,
-      [
-        orgId, userId,
-        dest.civilite || null,
-        dest.prenom || null,
-        dest.nom || null,
-        dest.nom_societe || null,
-        dest.adresse_ligne1 || null,
-        dest.code_postal || null,
-        dest.ville || null,
-      ]
-    );
-  } catch (err) {
-    console.error("[CRM AUTO-CREATE DIRECT]", err);
+  const candidats: Array<[string, unknown]> = [
+    ["user_id", params.userId],
+    ["organization_id", params.organizationId],
+    // recipient est NOT NULL : c'est l'omission qui faisait echouer l'insert.
+    ["recipient", libelleDestinataire],
+    ["recipient_name", libelleDestinataire],
+    ["service_postal_uid", params.uid],
+    ["destinataire", JSON.stringify(params.destinataire)],
+    ["type_affranchissement", params.typeAffranchissement],
+    ["couleur", params.couleur],
+    ["recto_verso", params.rectoVerso],
+    ["expediteur", JSON.stringify(params.expediteur)],
+    ["status", "sent"],
+    ["prix", params.prix],
+    ["credits_used", params.creditsUtilises],
+    ["sent_at", new Date()],
+  ];
+
+  const retenus = candidats.filter(([colonne]) => existantes.has(colonne));
+  const colonnes = retenus.map(([c]) => c);
+  const valeurs = retenus.map(([, v]) => v);
+  const placeholders = valeurs.map((_, i) => `$${i + 1}`).join(", ");
+
+  await query(
+    `INSERT INTO mail_history (${colonnes.join(", ")}) VALUES (${placeholders})`,
+    valeurs
+  );
+}
+
+/** Cree ou met a jour le contact CRM correspondant au destinataire. */
+async function majContactCrm(
+  orgId: string,
+  userId: string,
+  dest: Record<string, unknown>
+): Promise<void> {
+  const existantes = await getColonnes("contacts");
+
+  const existing = await query(
+    `SELECT id FROM contacts
+      WHERE organization_id = $1
+        AND (
+          (company_name IS NOT NULL AND company_name <> '' AND company_name = $2)
+          OR (address IS NOT NULL AND address <> '' AND address = $3 AND postal_code = $4)
+        )
+      LIMIT 1`,
+    [orgId, dest.nom_societe || "", dest.adresse_ligne1 || "", dest.code_postal || ""]
+  );
+
+  if (existing.rows.length > 0) {
+    const majs = ["updated_at = now()"];
+    if (existantes.has("mail_count")) majs.push("mail_count = COALESCE(mail_count, 0) + 1");
+    if (existantes.has("last_contacted_at")) majs.push("last_contacted_at = now()");
+    await query(`UPDATE contacts SET ${majs.join(", ")} WHERE id = $1`, [
+      existing.rows[0].id,
+    ]);
+    return;
   }
+
+  const candidats: Array<[string, unknown]> = [
+    ["organization_id", orgId],
+    ["user_id", userId],
+    ["civilite", dest.civilite ?? null],
+    ["first_name", dest.prenom ?? null],
+    ["last_name", dest.nom ?? null],
+    ["company_name", dest.nom_societe ?? null],
+    ["address", dest.adresse_ligne1 ?? null],
+    ["postal_code", dest.code_postal ?? null],
+    ["city", dest.ville ?? null],
+    ["status", "contacted"],
+    ["mail_count", 1],
+    ["last_contacted_at", new Date()],
+  ];
+
+  const retenus = candidats.filter(([colonne]) => existantes.has(colonne));
+  const placeholders = retenus.map((_, i) => `$${i + 1}`).join(", ");
+
+  await query(
+    `INSERT INTO contacts (${retenus.map(([c]) => c).join(", ")}) VALUES (${placeholders})`,
+    retenus.map(([, v]) => v)
+  );
 }
 
 export async function POST(req: NextRequest) {
-  // Suivi du debit pour pouvoir rembourser si l'envoi n'aboutit pas.
-  let refund: { orgId: string; cost: number } | null = null;
-  let mailSent = false;
+  const envoiId = randomUUID();
+  const avertissements: string[] = [];
+
   try {
+    // =======================================================================
+    // PHASE 1 - PRE-ENVOI (entierement annulable, rien n'est parti)
+    // =======================================================================
     const { auth, error, status } = await authenticateRequest(req);
     if (!auth) return NextResponse.json({ error }, { status: status || 401 });
+
+    // Les 10 routes de courrier ne verifiaient AUCUNE permission, alors que
+    // `courrier.send` existe : un role viewer pouvait declencher des envois
+    // payants sur le compte de son organisation.
+    const refus = await checkPermission(auth, "courrier.send");
+    if (refus) return refus;
 
     if (!SP_API_KEY) {
       return NextResponse.json({ error: "Service courrier non configuré" }, { status: 503 });
@@ -72,185 +200,278 @@ export async function POST(req: NextRequest) {
       variables,
     } = body;
 
-    // Validate
-    if (!adresse_destination || !adresse_destination.adresse_ligne1 || !adresse_destination.code_postal || !adresse_destination.ville) {
-      return NextResponse.json({ error: "Adresse destinataire incomplète" }, { status: 400 });
+    const destinataireCheck = validerDestinataire(adresse_destination);
+    if (!destinataireCheck.ok) {
+      return NextResponse.json(
+        {
+          error: "Adresse destinataire incomplète",
+          champs_manquants: destinataireCheck.manquants,
+        },
+        { status: 400 }
+      );
     }
 
     if (!fichier || !fichier.contenu_base64 || !fichier.format) {
-      return NextResponse.json({ error: "Fichier requis (format + contenu_base64)" }, { status: 400 });
-    }
-
-    // Source unique de verite pour le cout en credits (lib/service-postal).
-    const creditCost = getCreditCost(type_affranchissement);
-    const adminBypass = isAdminUser(auth);
-
-    // Check credits (skip for admin)
-    const orgResult = await query(
-      `SELECT credits_balance, name, address, city, postal_code, country,
-        sender_civilite, sender_first_name, sender_last_name, sender_company,
-        sender_address, sender_address2, sender_postal_code, sender_city, sender_country
-      FROM organizations WHERE id = $1`,
-      [auth.user.organization_id]
-    );
-    const org = orgResult.rows[0];
-    if (!org) {
-      return NextResponse.json({ error: "Organisation introuvable" }, { status: 404 });
-    }
-
-    // Debit ATOMIQUE avant l'envoi: empeche la double-depense concurrente (TOCTOU) et
-    // garantit qu'on ne poste jamais un courrier sans avoir securise les credits.
-    // En cas d'echec d'envoi, on rembourse (refund ci-dessous).
-    if (!adminBypass) {
-      const debit = await query(
-        "UPDATE organizations SET credits_balance = credits_balance - $1, credits_used = credits_used + $1, updated_at = now() WHERE id = $2 AND credits_balance >= $1 RETURNING credits_balance",
-        [creditCost, auth.user.organization_id]
+      return NextResponse.json(
+        { error: "Fichier requis (format + contenu_base64)" },
+        { status: 400 }
       );
-      if (debit.rows.length === 0) {
-        return NextResponse.json({
-          error: `Crédits insuffisants. Besoin: ${creditCost}, Disponible: ${org.credits_balance || 0}`,
-          credits_needed: creditCost,
-          credits_available: org.credits_balance || 0,
-        }, { status: 402 });
+    }
+
+    // Tarification : leve sur type inconnu ou marge insuffisante, au lieu de
+    // retomber silencieusement sur le tarif de la lettre verte.
+    let tarif: DecompositionTarifaire;
+    try {
+      tarif = calculerTarif(type_affranchissement);
+    } catch (err) {
+      if (err instanceof TarificationError) {
+        return NextResponse.json({ error: err.message, code: err.code }, { status: 400 });
       }
-      refund = { orgId: auth.user.organization_id!, cost: creditCost };
+      throw err;
     }
 
-    // Build expedition address from sender profile (preferred) or org fields (fallback)
-    const hasSenderProfile = org.sender_address && org.sender_postal_code && org.sender_city;
-    const adresse_expedition: Record<string, string | undefined> = hasSenderProfile
-      ? {
-          civilite: org.sender_civilite || undefined,
-          prenom: org.sender_first_name || undefined,
-          nom: org.sender_last_name || undefined,
-          nom_societe: org.sender_company || undefined,
-          adresse_ligne1: org.sender_address,
-          adresse_ligne2: org.sender_address2 || undefined,
-          code_postal: org.sender_postal_code,
-          ville: org.sender_city,
-          pays: org.sender_country || "FRANCE",
+    const organizationId = auth.user.organization_id;
+    if (!organizationId) {
+      return NextResponse.json({ error: "Aucune organisation associée" }, { status: 403 });
+    }
+
+    const org = await chargerOrganisationPourExpedition(organizationId, ["credits_balance"]);
+    const expediteur = resoudreExpediteur(org);
+    if (!expediteur.ok || !expediteur.adresse) {
+      // Garde-fou non negociable : jamais d'adresse de retour inventee.
+      return NextResponse.json(
+        {
+          error: messageExpediteurIncomplet(expediteur),
+          code: "EXPEDITEUR_INCOMPLET",
+          champs_manquants: expediteur.manquants,
+        },
+        { status: 422 }
+      );
+    }
+
+    const adminBypass = isAdminUser(auth);
+    let soldeApres = Number(org?.credits_balance ?? 0);
+
+    if (!adminBypass) {
+      try {
+        const resultat = await withTransaction((client) =>
+          debiterCredits(client, {
+            organizationId,
+            userId: auth.user.id,
+            montant: tarif.credits,
+            type: "usage",
+            description: `Courrier ${tarif.type_affranchissement} (envoi ${envoiId})`,
+            reference: `courrier:${envoiId}`,
+            montantEurCentimes: tarif.total_ttc_centimes,
+            metadata: {
+              envoi_id: envoiId,
+              cout_prestataire_ht_centimes: tarif.cout_prestataire_ht_centimes,
+              marge_ht_centimes: tarif.marge_ht_centimes,
+              tva_centimes: tarif.tva_centimes,
+            },
+          })
+        );
+        soldeApres = resultat.soldeApres;
+      } catch (err) {
+        if (err instanceof CreditsInsuffisantsError) {
+          return NextResponse.json(
+            {
+              error: err.message,
+              credits_needed: err.requis,
+              credits_available: err.disponible,
+            },
+            { status: 402 }
+          );
         }
-      : {
-          nom_societe: org.name || "Proprietaire.net",
-          adresse_ligne1: org.address || "1 rue de la Paix",
-          code_postal: org.postal_code || "75001",
-          ville: org.city || "PARIS",
-          pays: org.country || "France",
-        };
-
-    // Remove undefined values
-    Object.keys(adresse_expedition).forEach((k) => {
-      if (adresse_expedition[k] === undefined) delete adresse_expedition[k];
-    });
-
-    if (!adresse_destination.pays) {
-      adresse_destination.pays = "France";
+        throw err;
+      }
     }
 
-    // Build payload
-    const spPayload: any = {
-      adresse_expedition,
+    // =======================================================================
+    // PHASE 2 - ENVOI (point de non-retour)
+    // =======================================================================
+    if (!adresse_destination.pays) adresse_destination.pays = "France";
+
+    const spPayload: Record<string, unknown> = {
+      adresse_expedition: expediteur.adresse,
       adresse_destination,
       fichier,
-      type_affranchissement,
+      type_affranchissement: tarif.type_affranchissement,
       couleur,
       recto_verso,
       placement_adresse,
     };
-
     if (variables && Object.keys(variables).length > 0) {
       spPayload.variables = variables;
     }
 
-    // Call Service Postal direct send
-    const spResponse = await fetch(`${SP_API_URL}/lettres`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "apiKey": SP_API_KEY,
-      },
-      body: JSON.stringify(spPayload),
-    });
+    let spResult: Record<string, unknown>;
+    let spOk = false;
+    let spStatus = 502;
 
-    const spResult = await spResponse.json();
-
-    if (!spResponse.ok) {
-      // Le courrier n'est pas parti: rembourser le debit effectue avant l'envoi.
-      if (refund) {
-        await query(
-          "UPDATE organizations SET credits_balance = credits_balance + $1, credits_used = credits_used - $1, updated_at = now() WHERE id = $2",
-          [refund.cost, refund.orgId]
+    try {
+      const spResponse = await fetch(`${SP_API_URL}/lettres`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", apiKey: SP_API_KEY },
+        body: JSON.stringify(spPayload),
+        signal: AbortSignal.timeout(SP_TIMEOUT_MS),
+      });
+      spStatus = spResponse.status;
+      spResult = await spResponse.json().catch(() => ({}));
+      spOk = spResponse.ok;
+    } catch (err) {
+      // Timeout ou reseau : on NE PEUT PAS savoir si le pli est parti.
+      // On rembourse et on le dit explicitement, plutot que de laisser
+      // l'utilisateur face a un debit sans reponse.
+      if (!adminBypass) {
+        await rembourser(organizationId, auth.user.id, tarif.credits, envoiId,
+          "Echec reseau vers le prestataire").catch((e) =>
+          console.error(`[COURRIER ${envoiId}] Remboursement impossible`, e)
         );
-        refund = null;
       }
-      console.error("[COURRIER DIRECT] Service Postal error:", spResult);
-      return NextResponse.json({
-        error: spResult.message || spResult.erreur || "Erreur du service postal",
-        details: spResult,
-      }, { status: spResponse.status });
-    }
-
-    // L'envoi a reussi: le debit est definitif, on n'a plus a rembourser.
-    mailSent = true;
-
-    // Tracer la transaction de credits (skip admin)
-    if (!adminBypass) {
-      await query(
-        "INSERT INTO credit_transactions (organization_id, user_id, amount, type, description) VALUES ($1, $2, $3, 'usage', $4)",
-        [auth.user.organization_id, auth.user.id, -creditCost, `Courrier direct ${type_affranchissement} — ${spResult.uid}`]
+      console.error(`[COURRIER ${envoiId}] Appel Service Postal en echec`, err);
+      return NextResponse.json(
+        {
+          error:
+            "Le service postal n'a pas repondu. Vos credits ont ete rembourses. " +
+            "Si un pli avait malgre tout ete accepte, il apparaitra dans votre historique.",
+          code: "PRESTATAIRE_INJOIGNABLE",
+          envoi_id: envoiId,
+        },
+        { status: 504 }
       );
     }
 
-    // Save in mail_history
-    await query(
-      `INSERT INTO mail_history (
-        user_id, organization_id, service_postal_uid, destinataire,
-        type_affranchissement, couleur, recto_verso, status, prix, credits_used, sent_at, expediteur
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'sent', $8, $9, now(), $10)`,
-      [
-        auth.user.id,
-        auth.user.organization_id,
-        spResult.uid,
-        JSON.stringify(adresse_destination),
-        type_affranchissement,
-        couleur,
-        recto_verso,
-        spResult.total || 0,
-        adminBypass ? 0 : creditCost,
-        JSON.stringify(adresse_expedition),
-      ]
-    );
+    if (!spOk) {
+      if (!adminBypass) {
+        await rembourser(organizationId, auth.user.id, tarif.credits, envoiId,
+          "Refus du prestataire").catch((e) =>
+          console.error(`[COURRIER ${envoiId}] Remboursement impossible`, e)
+        );
+      }
+      console.error(`[COURRIER ${envoiId}] Service Postal a refuse`, spResult);
+      return NextResponse.json(
+        {
+          // Le detail brut du prestataire n'est pas relaye tel quel.
+          error: "Le service postal a refusé l'envoi. Vos crédits ont été remboursés.",
+          code: "PRESTATAIRE_REFUS",
+          envoi_id: envoiId,
+        },
+        { status: spStatus >= 400 && spStatus < 500 ? 422 : 502 }
+      );
+    }
 
-    // Auto-create CRM contact
-    await autoCreateContact(auth.user.organization_id!, auth.user.id, adresse_destination);
+    const uid = String(spResult.uid ?? "");
+
+    // =======================================================================
+    // PHASE 3 - POST-ENVOI (best-effort, ne rembourse jamais)
+    // =======================================================================
+    try {
+      await enregistrerHistorique({
+        userId: auth.user.id,
+        organizationId,
+        uid,
+        destinataire: adresse_destination,
+        expediteur: expediteur.adresse,
+        typeAffranchissement: tarif.type_affranchissement,
+        couleur,
+        rectoVerso: recto_verso,
+        prix: Number(spResult.total ?? 0),
+        creditsUtilises: adminBypass ? 0 : tarif.credits,
+      });
+    } catch (err) {
+      // Le courrier EST parti. On ne rembourse pas, on signale.
+      avertissements.push(
+        "Le courrier a été envoyé mais n'a pas pu être enregistré dans l'historique."
+      );
+      console.error(
+        `[COURRIER ${envoiId}] ECHEC HISTORIQUE apres envoi reussi uid=${uid} ` +
+          `org=${organizationId} credits=${tarif.credits} - rattrapage manuel requis`,
+        err
+      );
+    }
+
+    // Correlation du mouvement de credits avec l'identifiant prestataire.
+    if (!adminBypass && uid) {
+      try {
+        await query(
+          `UPDATE credit_transactions
+              SET description = $1
+            WHERE organization_id = $2
+              AND description LIKE $3`,
+          [
+            `Courrier ${tarif.type_affranchissement} — ${uid}`,
+            organizationId,
+            `%${envoiId}%`,
+          ]
+        );
+      } catch (err) {
+        console.error(`[COURRIER ${envoiId}] Correlation uid impossible`, err);
+      }
+    }
+
+    try {
+      await majContactCrm(organizationId, auth.user.id, adresse_destination);
+    } catch (err) {
+      avertissements.push("Le contact CRM n'a pas pu être mis à jour.");
+      console.error(`[COURRIER ${envoiId}] CRM`, err);
+    }
 
     return NextResponse.json({
       success: true,
-      uid: spResult.uid,
+      uid,
+      envoi_id: envoiId,
       prix: {
-        affranchissement: spResult.affranchissement,
-        service: spResult.service,
-        total: spResult.total,
+        affranchissement: spResult.affranchissement ?? null,
+        service: spResult.service ?? null,
+        total: spResult.total ?? null,
       },
-      credits_used: adminBypass ? 0 : creditCost,
-      credits_remaining: adminBypass ? 999999 : (org.credits_balance - creditCost),
+      // Decomposition tarifaire explicite : ce que paie le client, ce que coute
+      // le prestataire, ce que gagne l'entreprise.
+      tarification: {
+        credits: tarif.credits,
+        cout_prestataire_ht_centimes: tarif.cout_prestataire_ht_centimes,
+        marge_ht_centimes: tarif.marge_ht_centimes,
+        tva_centimes: tarif.tva_centimes,
+        total_ttc_centimes: tarif.total_ttc_centimes,
+        marge_pct: tarif.marge_pct_effective,
+      },
+      credits_used: adminBypass ? 0 : tarif.credits,
+      credits_remaining: soldeApres,
+      expediteur_source: expediteur.source,
+      avertissements: avertissements.length > 0 ? avertissements : undefined,
       message: adminBypass
-        ? `Courrier envoyé avec succès (admin — 0 crédit déduit)`
-        : `Courrier envoyé avec succès (${creditCost} crédits)`,
+        ? "Courrier envoyé (admin, 0 crédit déduit)"
+        : `Courrier envoyé (${tarif.credits} crédits)`,
     });
-  } catch (err: any) {
-    // Si on a debite mais que le courrier n'est pas parti, rembourser.
-    if (refund && !mailSent) {
-      try {
-        await query(
-          "UPDATE organizations SET credits_balance = credits_balance + $1, credits_used = credits_used - $1, updated_at = now() WHERE id = $2",
-          [refund.cost, refund.orgId]
-        );
-      } catch (refundErr) {
-        console.error("[COURRIER DIRECT] Echec du remboursement:", refundErr);
-      }
-    }
-    console.error("[COURRIER DIRECT]", err);
-    return NextResponse.json({ error: err.message || "Erreur serveur" }, { status: 500 });
+  } catch (err) {
+    // Toute exception non rattrapee arrive ici AVANT l'envoi : les phases 2 et 3
+    // gerent elles-memes leurs echecs. Aucun remboursement a faire ici.
+    console.error(`[COURRIER ${envoiId}]`, err);
+    return NextResponse.json(
+      { error: "Erreur serveur", envoi_id: envoiId },
+      { status: 500 }
+    );
   }
+}
+
+/** Remboursement integral, journalise, idempotent par reference. */
+async function rembourser(
+  organizationId: string,
+  userId: string,
+  credits: number,
+  envoiId: string,
+  motif: string
+): Promise<void> {
+  await withTransaction((client) =>
+    crediterCredits(client, {
+      organizationId,
+      userId,
+      montant: credits,
+      type: "refund",
+      description: `Remboursement courrier (envoi ${envoiId}) : ${motif}`,
+      reference: `refund:${envoiId}`,
+      metadata: { envoi_id: envoiId, motif },
+    })
+  );
 }

@@ -58,11 +58,55 @@ export function getClientIP(req: Request): string {
   return 'unknown';
 }
 
-export function checkRateLimit(ip: string, action: string): { allowed: boolean; retryAfter?: number } {
+/** Signale une seule fois que l'IP cliente n'est pas resoluble. */
+let avertissementIpEmis = false;
+
+/**
+ * Cle de comptage.
+ *
+ * DENI DE SERVICE D'AUTHENTIFICATION CORRIGE ICI
+ *
+ * Quand TRUST_PROXY n'est pas defini et que le runtime n'expose pas d'IP, ce
+ * qui est le cas derriere Docker en mode standalone, getClientIP retombait sur
+ * la chaine 'unknown'. TOUTES les requetes partageaient alors la meme cle
+ * `login:unknown` : cinq echecs de connexion, provenant de n'importe qui,
+ * bloquaient la connexion de TOUS les utilisateurs pendant quinze minutes.
+ *
+ * Quand l'IP est indeterminee, on se rabat donc sur un discriminant fonctionnel
+ * fourni par l'appelant (l'adresse email pour une connexion). Le comptage reste
+ * effectif par compte, ce qui est de toute facon la dimension pertinente pour
+ * une attaque par force brute, sans jamais devenir global.
+ */
+function construireCle(ip: string, action: string, discriminant?: string): string {
+  if (ip !== 'unknown') return `${action}:${ip}`;
+
+  if (!avertissementIpEmis) {
+    avertissementIpEmis = true;
+    console.warn(
+      '[RATE-LIMIT] IP cliente non resoluble. Definir TRUST_PROXY=1 si ' +
+        'l\'application tourne derriere un proxy de confiance. Repli sur un ' +
+        'comptage par compte.'
+    );
+  }
+
+  if (discriminant) {
+    return `${action}:id:${discriminant.trim().toLowerCase()}`;
+  }
+
+  // Sans discriminant, un compteur global rebloquerait tout le monde : on
+  // preferere ne pas limiter plutot que de provoquer un deni de service.
+  return `${action}:unbounded:${Math.random()}`;
+}
+
+export function checkRateLimit(
+  ip: string,
+  action: string,
+  discriminant?: string
+): { allowed: boolean; retryAfter?: number } {
   const config = RATE_LIMITS[action];
   if (!config) return { allowed: true };
 
-  const key = `${action}:${ip}`;
+  const key = construireCle(ip, action, discriminant);
   const now = Date.now();
   const entry = rateLimitMap.get(key);
 

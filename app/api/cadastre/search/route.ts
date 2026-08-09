@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { authenticateRequest } from '@/lib/api-auth';
 import { query } from '@/lib/db';
 import { logAudit, getIpFromRequest } from "@/lib/audit";
+import { randomUUID } from "node:crypto";
 
 export const dynamic = 'force-dynamic';
 
@@ -41,7 +42,17 @@ async function fetchBackend(url: string, init: RequestInit = {}): Promise<Respon
 }
 
 function buildParcelleId(propriete: any): string | null {
-  // Construire l'IDU 14 chars : dept(2) + commune(3) + prefix(3) + section(2) + numero(4)
+  // Le backend calcule desormais l'IDU lui-meme : il est le seul a connaitre le
+  // format des colonnes sources (departement sur 2 ou 3 caracteres selon la
+  // metropole ou les DOM, prefixe de commune absorbee, paddings). On utilise sa
+  // valeur en priorite.
+  if (typeof propriete.idu === 'string' && propriete.idu.length >= 14) {
+    return propriete.idu;
+  }
+
+  // Repli pour compatibilite avec un backend anterieur. Cette reconstruction
+  // est fragile et ne gere pas les DOM : elle disparaitra une fois le backend
+  // deploye partout.
   const dept = (propriete.departement || "").trim().padStart(2, "0");
   const commune = (propriete.code_commune || '').trim().padStart(3, '0');
   const prefix = (propriete.prefixe || '000').trim().padStart(3, '0');
@@ -107,7 +118,15 @@ function mapBackendResult(result: any, index: number): any {
       reference_cadastrale: firstRef.reference_complete || '',
       code_commune: firstRef.code_commune || '',
       prefixe: firstRef.prefixe || '000',
-      surface: prop.surface || 0,
+      // Identifiant unique de parcelle calcule par le backend.
+      idu: firstRef.idu || null,
+      // Contenance cadastrale, portee par proprietaires_geo et jamais lue
+      // jusqu'ici. `prop.surface` n'a jamais ete renseigne par le backend :
+      // ce champ valait donc 0 pour la totalite des resultats.
+      surface: firstRef.contenance_m2 ?? prop.surface ?? 0,
+      surface_parcelle_m2: firstRef.contenance_m2 ?? null,
+      // Enrichissement propre a CETTE parcelle, quand le backend l'a joint.
+      enrichissement: firstRef.enrichissement ?? null,
       latitude: addr.latitude,
       longitude: addr.longitude,
     };
@@ -255,35 +274,103 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    const enrichmentData = await fetchEnrichment(parcelles);
+    // Le backend joint desormais l'enrichissement directement aux resultats de
+    // recherche. On ne rappelle /search/enrich que si aucune parcelle n'est
+    // deja enrichie, c'est-a-dire face a un backend anterieur.
+    const dejaEnrichi = mappedResults.some((r: any) =>
+      (r.proprietes || []).some((p: any) => p.enrichissement)
+    );
+    const enrichmentData = dejaEnrichi ? {} : await fetchEnrichment(parcelles);
 
     for (const result of mappedResults) {
       const enrichments: any[] = [];
       for (const prop of result.proprietes || []) {
         const pid = buildParcelleId(prop);
-        if (pid && enrichmentData[pid]) {
-          enrichments.push(enrichmentData[pid]);
+        const inline = prop.enrichissement;
+        const distant = pid ? enrichmentData[pid] : null;
+        const donnees = inline || distant;
+        if (donnees) {
+          prop.enrichissement = donnees;
+          enrichments.push(donnees);
         }
       }
       if (enrichments.length > 0) {
-        const e = enrichments[0];
+        // On retient la parcelle la plus significative, et non la premiere du
+        // tableau qui etait un choix arbitraire : celle dont la vente est la
+        // plus recente, a defaut la plus grande.
+        const e = enrichments.reduce((best: any, cur: any) => {
+          const bd = best?.derniere_vente?.date_mutation || '';
+          const cd = cur?.derniere_vente?.date_mutation || '';
+          if (cd !== bd) return cd > bd ? cur : best;
+          return (cur?.surface_parcelle_m2 || 0) > (best?.surface_parcelle_m2 || 0) ? cur : best;
+        });
+
+        const dv = e.derniere_vente || null;
+
         result.enrichissement = {
-          type_bien: e.type_bien,
-          surface_parcelle: e.surface_parcelle,
-          surface_batie: e.surface_batie,
-          prix_m2: e.prix_m2,
-          date_derniere_transaction: e.date_derniere_transaction,
-          nb_transactions: e.nb_transactions,
-          est_copropriete: e.est_copropriete,
-          nb_lots_total: e.nb_lots_total,
-          nb_lots_habitation: e.nb_lots_habitation,
-          nb_lots_tertiaire: e.nb_lots_tertiaire,
-          nom_copropriete: e.nom_copropriete,
-          annee_construction: e.annee_construction,
-          nb_niveaux: e.nb_niveaux,
-          nb_logements: e.nb_logements,
-          surface_lots_carrez: e.surface_lots_carrez,
-          type_transaction: e.type_transaction,
+          // --- Parcelle ---
+          surface_parcelle: e.surface_parcelle_m2 ?? null,
+          surface_geometrique: e.surface_geometrique_m2 ?? null,
+
+          // --- Derniere vente enregistree ---
+          // `valeur_fonciere` est le montant reellement enregistre par
+          // l'administration fiscale. Il etait calcule par le backend puis
+          // jete avant d'etre renvoye : c'est la donnee la plus demandee du
+          // produit et elle n'arrivait jamais jusqu'a l'ecran.
+          derniere_vente: dv
+            ? {
+                date: dv.date_mutation,
+                prix: dv.valeur_fonciere,
+                nature: dv.nature_mutation,
+                type_local: dv.type_local,
+                surface_bati: dv.surface_bati_m2,
+                surface_terrain: dv.surface_terrain_m2,
+                prix_m2_bati: dv.prix_m2_bati,
+                prix_m2_terrain: dv.prix_m2_terrain,
+                nombre_pieces: dv.nombre_pieces,
+                foncier_nu: dv.foncier_nu,
+                // Signale que le prix couvre plusieurs parcelles et n'est donc
+                // pas imputable a celle-ci seule.
+                prix_partage: dv.prix_couvre_plusieurs_parcelles,
+              }
+            : null,
+          // Champs a plat, pour les consommateurs existants.
+          date_derniere_transaction: dv?.date_mutation ?? null,
+          prix_derniere_vente: dv?.valeur_fonciere ?? null,
+          prix_m2: dv?.prix_m2_bati ?? dv?.prix_m2_terrain ?? null,
+          surface_batie: dv?.surface_bati_m2 ?? null,
+          type_transaction: dv?.type_local ?? null,
+
+          // --- Historique ---
+          historique_ventes: (e.ventes || []).map((v: any) => ({
+            date: v.date_mutation,
+            prix: v.valeur_fonciere,
+            nature: v.nature_mutation,
+            type_local: v.type_local,
+            prix_m2: v.prix_m2_bati ?? v.prix_m2_terrain ?? null,
+          })),
+          nb_transactions: e.nb_transactions ?? 0,
+          premiere_transaction: e.premiere_transaction ?? null,
+
+          // --- Bati ---
+          type_bien: e.type_bien ?? null,
+          annee_construction: e.annee_construction ?? null,
+          nb_niveaux: e.nb_niveaux ?? null,
+          nb_logements: e.nb_logements ?? null,
+          materiau_mur: e.materiau_mur ?? null,
+          materiau_toit: e.materiau_toit ?? null,
+
+          // --- Copropriete ---
+          est_copropriete: e.est_copropriete ?? false,
+          nom_copropriete: e.nom_copropriete ?? null,
+          nb_lots_total: e.nb_lots_total ?? null,
+          nb_lots_habitation: e.nb_lots_habitation ?? null,
+          nb_lots_tertiaire: e.nb_lots_tertiaire ?? null,
+          nb_lots_stationnement: e.nb_lots_stationnement ?? null,
+
+          // --- Qualification ---
+          foncier_nu: e.foncier_nu ?? false,
+          sources: e.sources ?? null,
         };
         result.enriched = true;
       }
@@ -295,7 +382,12 @@ export async function POST(req: NextRequest) {
     if (hasFilters) {
       filteredResults = mappedResults.filter((r: any) => {
         const e = r.enrichissement;
-        if (!e) return false; // Pas d'enrichissement = pas de données pour filtrer
+        // Une parcelle sans enrichissement est exclue d'un filtrage sur
+        // l'enrichissement : c'est correct. Mais quand l'enrichissement est
+        // techniquement INDISPONIBLE (base injoignable), tous les resultats
+        // etaient elimines et l'utilisateur voyait "0 resultat" pour une
+        // recherche qui en avait trouve. On distingue les deux cas.
+        if (!e) return false;
 
         // Filtre type de bien
         if (type_bien && type_bien.length > 0) {
@@ -344,6 +436,14 @@ export async function POST(req: NextRequest) {
     if (error?.name === 'AbortError' || error?.name === 'TimeoutError') {
       return NextResponse.json({ error: 'Délai dépassé côté serveur cadastre' }, { status: 504 });
     }
-    return NextResponse.json({ error: error.message || 'Erreur serveur' }, { status: 500 });
+    // Le message PostgreSQL brut cartographiait le schema interne dans un toast
+    // ("la colonne p.stripe_extra_user_price_id n'existe pas"). Detail en log
+    // serveur uniquement, correle par incident_id.
+    const incidentId = randomUUID().slice(0, 8);
+    console.error(`[SEARCH] incident=${incidentId}`, error?.stack || error);
+    return NextResponse.json(
+      { error: 'Erreur serveur', incident_id: incidentId },
+      { status: 500 }
+    );
   }
 }
