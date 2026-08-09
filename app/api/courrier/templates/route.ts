@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { authenticateRequest } from "@/lib/api-auth";
 import { query } from "@/lib/db";
+import { erreurServeur } from '@/lib/api-error';
 
 export const dynamic = "force-dynamic";
 
@@ -21,7 +22,7 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ templates: result.rows });
   } catch (err: any) {
     console.error("[COURRIER TEMPLATES]", err);
-    return NextResponse.json({ error: err.message || "Erreur serveur" }, { status: 500 });
+    return erreurServeur('courrier/templates', err);
   }
 }
 
@@ -55,7 +56,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ template: result.rows[0] });
   } catch (err: any) {
     console.error("[COURRIER TEMPLATES CREATE]", err);
-    return NextResponse.json({ error: err.message || "Erreur serveur" }, { status: 500 });
+    return erreurServeur('courrier/templates', err);
   }
 }
 
@@ -85,6 +86,6 @@ export async function DELETE(req: NextRequest) {
     return NextResponse.json({ success: true, id });
   } catch (err: any) {
     console.error("[COURRIER TEMPLATES DELETE]", err);
-    return NextResponse.json({ error: err.message || "Erreur serveur" }, { status: 500 });
+    return erreurServeur('courrier/templates', err);
   }
 }

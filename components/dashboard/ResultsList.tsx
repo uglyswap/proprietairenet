@@ -203,6 +203,76 @@ function TypeBadge({ type }: { type: string | null | undefined }) {
   return <span className={`inline-flex px-2 py-0.5 rounded-full text-[10px] font-medium ${c.color}`}>{c.label}</span>
 }
 
+/**
+ * Corps attendu par POST /api/lists/items, seul endpoint d'ajout reellement
+ * implemente.
+ */
+function buildListItemPayload(listId: string, result: CadastreResult) {
+  const firstProp = result.proprietes?.[0]
+  return {
+    list_id: listId,
+    company_name: result.proprietaire.denomination,
+    director_name: (result.proprietaire as any).dirigeant ?? null,
+    property_address: firstProp?.adresse ?? null,
+    property_postal_code: firstProp?.code_postal ?? null,
+    property_city: firstProp?.ville ?? null,
+    siren: result.proprietaire.siren ?? null,
+    data: result,
+  }
+}
+
+async function addResultToList(listId: string, result: CadastreResult): Promise<boolean> {
+  const res = await fetch('/api/lists/items', {
+    method: 'POST',
+    headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+    body: JSON.stringify(buildListItemPayload(listId, result)),
+  })
+  return res.ok
+}
+
+/** Retrouve l'item correspondant a un resultat dans une liste, puis le supprime. */
+async function removeResultFromList(listId: string, result: CadastreResult): Promise<boolean> {
+  const detail = await fetch(`/api/lists/detail?id=${encodeURIComponent(listId)}`, {
+    headers: getAuthHeaders(),
+  })
+  if (!detail.ok) return false
+
+  const data = await detail.json()
+  const siren = result.proprietaire.siren || null
+  const denomination = result.proprietaire.denomination
+
+  const item = (data.items || []).find(
+    (i: any) => (siren && i.siren === siren) || (!siren && i.company_name === denomination)
+  )
+  if (!item) return false
+
+  const del = await fetch(
+    `/api/lists/items?list_id=${encodeURIComponent(listId)}&item_id=${encodeURIComponent(item.id)}`,
+    { method: 'DELETE', headers: getAuthHeaders() }
+  )
+  return del.ok
+}
+
+/** Identifiant de la liste "Favoris", creee au besoin. */
+async function ensureFavorisList(): Promise<string | null> {
+  const res = await fetch('/api/lists', { headers: getAuthHeaders() })
+  if (res.ok) {
+    const data = await res.json()
+    const existante = (data.lists || []).find((l: any) => l.name === 'Favoris')
+    if (existante?.id) return existante.id
+  }
+
+  const creation = await fetch('/api/lists', {
+    method: 'POST',
+    headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: 'Favoris', color: '#F59E0B' }),
+  })
+  if (!creation.ok) return null
+
+  const data = await creation.json()
+  return data.list?.id ?? null
+}
+
 export default function ResultsList({ results, onExport, onReveal, onCreditsUpdate, selectedResults, onSelectionChange, highlightedIndex }: ResultsListProps) {
   const [revealingIds, setRevealingIds] = useState<Set<string>>(new Set())
   const [expandedIds, setExpandedIds] = useState<Set<number>>(new Set())
@@ -240,49 +310,30 @@ export default function ResultsList({ results, onExport, onReveal, onCreditsUpda
     const isFav = favoriteIds.has(resultKey)
     
     try {
+      // /api/lists/add et /api/lists/remove n'existent pas : seules /api/lists,
+      // /api/lists/detail et /api/lists/items sont implementees. Ces deux appels
+      // renvoyaient donc un 404 sur l'ecran principal du produit. La branche
+      // "creer la liste et ajouter" perdait de surcroit le resultat en silence,
+      // POST /api/lists ne lisant que `name`.
+      const favListId = await ensureFavorisList()
+      if (!favListId) {
+        toast.error('Liste Favoris indisponible')
+        return
+      }
+
       if (isFav) {
-        // Remove from favorites list
-        const res = await fetch('/api/lists/remove', {
-          method: 'POST',
-          headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
-          body: JSON.stringify({ list_name: 'Favoris', result_ids: [result.id] })
-        })
-        if (res.ok) {
+        const retire = await removeResultFromList(favListId, result)
+        if (retire) {
           setFavoriteIds(prev => { const n = new Set(prev); n.delete(resultKey); return n })
           toast.success('Retiré des favoris')
         } else {
-          // Fallback: if remove endpoint doesn't exist, just toggle locally
-          setFavoriteIds(prev => { const n = new Set(prev); n.delete(resultKey); return n })
-          toast.success('Retiré des favoris')
+          // L'ancienne version basculait l'affichage meme quand l'appel echouait,
+          // ce qui faisait diverger l'ecran de la base.
+          toast.error('Impossible de retirer des favoris')
         }
       } else {
-        // Add to favorites - try to find/create the "Favoris" list
-        // First try adding directly with list name
-        let res = await fetch('/api/lists', { headers: getAuthHeaders() })
-        let favListId: string | null = null
-        if (res.ok) {
-          const data = await res.json()
-          const favList = (data.lists || []).find((l: any) => l.name === 'Favoris')
-          favListId = favList?.id || null
-        }
-        
-        if (favListId) {
-          // Add to existing list
-          res = await fetch('/api/lists/add', {
-            method: 'POST',
-            headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
-            body: JSON.stringify({ list_id: favListId, results: [result] })
-          })
-        } else {
-          // Create list and add
-          res = await fetch('/api/lists', {
-            method: 'POST',
-            headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name: 'Favoris', results: [result] })
-          })
-        }
-        
-        if (res.ok) {
+        const ajoute = await addResultToList(favListId, result)
+        if (ajoute) {
           setFavoriteIds(prev => new Set([...prev, resultKey]))
           toast.success('Ajouté aux favoris ⭐')
         } else {
@@ -349,11 +400,7 @@ export default function ResultsList({ results, onExport, onReveal, onCreditsUpda
   const handleAddToList = async (listId: string) => {
     if (!addToListResult) return
     try {
-      const res = await fetch('/api/lists/add', {
-        method: 'POST',
-        headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
-        body: JSON.stringify({ list_id: listId, results: [addToListResult] })
-      })
+      const res = { ok: await addResultToList(listId, addToListResult) }
       if (res.ok) {
         toast.success('Ajouté à la liste !')
         setAddToListResult(null)

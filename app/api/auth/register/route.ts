@@ -4,6 +4,7 @@ import { sendWelcomeEmail } from '@/lib/email';
 import { scheduleDripEmails } from '@/lib/drip';
 import { checkRateLimit, getClientIP } from '@/lib/rate-limit';
 import logger from '@/lib/logger';
+import { erreurServeur } from '@/lib/api-error';
 
 export const dynamic = 'force-dynamic';
 
@@ -68,10 +69,14 @@ export async function POST(req: NextRequest) {
 
     return response;
   } catch (error: any) {
-    logger.error('AUTH', 'Register error', { error: error.message });
-    return NextResponse.json(
-      { error: error.message || 'Erreur lors de l\'inscription' },
-      { status: error.message?.includes('existe déjà') ? 409 : 500 }
-    );
+    logger.error('AUTH', 'Register error', { error: error?.message });
+
+    // Seul le conflit d'email est un message metier legitime. Toute autre
+    // exception renvoyait son message PostgreSQL brut au navigateur.
+    if (error?.message?.includes('existe déjà')) {
+      return NextResponse.json({ error: error.message }, { status: 409 });
+    }
+
+    return erreurServeur('auth/register', error, 'Inscription impossible');
   }
 }

@@ -5,6 +5,7 @@ import { createNotification } from "@/lib/notifications";
 import logger from "@/lib/logger";
 import { logAudit, getIpFromRequest } from "@/lib/audit";
 import { getCreditCost } from "@/lib/service-postal";
+import { erreurServeur } from '@/lib/api-error';
 
 export const dynamic = "force-dynamic";
 
@@ -238,6 +239,6 @@ export async function POST(req: NextRequest) {
       }
     }
     logger.error('COURRIER', 'Send error', { error: err.message });
-    return NextResponse.json({ error: err.message || "Erreur serveur" }, { status: 500 });
+    return erreurServeur('courrier/send', err);
   }
 }

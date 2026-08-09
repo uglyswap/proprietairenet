@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { authenticateRequest } from "@/lib/api-auth";
 import { checkPermission } from "@/lib/permissions";
 import { query } from "@/lib/db";
+import { erreurServeur } from '@/lib/api-error';
 
 export const dynamic = "force-dynamic";
 
@@ -26,7 +27,7 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ sender: result.rows[0] });
   } catch (err: any) {
     console.error("[SENDER GET]", err);
-    return NextResponse.json({ error: err.message || "Erreur serveur" }, { status: 500 });
+    return erreurServeur('organization/sender', err);
   }
 }
 
@@ -87,6 +88,6 @@ export async function PUT(req: NextRequest) {
     return NextResponse.json({ success: true, message: "Profil expéditeur mis à jour" });
   } catch (err: any) {
     console.error("[SENDER PUT]", err);
-    return NextResponse.json({ error: err.message || "Erreur serveur" }, { status: 500 });
+    return erreurServeur('organization/sender', err);
   }
 }

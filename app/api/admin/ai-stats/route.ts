@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { authenticateRequest } from "@/lib/api-auth";
 import pool from "@/lib/db";
+import { erreurServeur } from '@/lib/api-error';
 
 export const dynamic = "force-dynamic";
 
@@ -136,6 +137,6 @@ export async function GET(req: NextRequest) {
     });
   } catch (err: any) {
     console.error("[AI STATS]", err);
-    return NextResponse.json({ error: err.message }, { status: 500 });
+    return erreurServeur('admin/ai-stats', err);
   }
 }

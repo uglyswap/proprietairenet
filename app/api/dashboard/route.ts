@@ -3,6 +3,7 @@ import { authenticateRequest } from '@/lib/api-auth';
 import { query } from '@/lib/db';
 import { getEffectiveRoleLevel } from '@/lib/permissions';
 import logger from '@/lib/logger';
+import { erreurServeur } from '@/lib/api-error';
 
 export const dynamic = 'force-dynamic';
 
@@ -126,6 +127,6 @@ export async function GET(req: NextRequest) {
     return NextResponse.json(data);
   } catch (err: any) {
     logger.error('DASHBOARD', 'GET error', { error: err.message });
-    return NextResponse.json({ error: err.message }, { status: 500 });
+    return erreurServeur('dashboard', err);
   }
 }

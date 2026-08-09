@@ -3,6 +3,7 @@ import { authenticateRequest } from "@/lib/api-auth";
 import stripe, { getOrCreateStripeCustomer, createCheckoutSession, getPlanBySlug, addCredits } from "@/lib/stripe";
 import { query } from "@/lib/db";
 import { logAudit, getIpFromRequest } from "@/lib/audit";
+import { erreurServeur } from '@/lib/api-error';
 
 export const dynamic = "force-dynamic";
 
@@ -162,6 +163,6 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Type de paiement invalide" }, { status: 400 });
   } catch (err: any) {
     console.error("[STRIPE CHECKOUT]", err);
-    return NextResponse.json({ error: err.message || "Erreur serveur" }, { status: 500 });
+    return erreurServeur('stripe/checkout', err);
   }
 }

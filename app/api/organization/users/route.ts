@@ -3,6 +3,7 @@ import { authenticateRequest } from "@/lib/api-auth";
 import { query } from "@/lib/db";
 import { createNotification } from "@/lib/notifications";
 import logger from "@/lib/logger";
+import { erreurServeur } from '@/lib/api-error';
 
 export const dynamic = "force-dynamic";
 
@@ -30,7 +31,7 @@ export async function GET(req: NextRequest) {
       owner_id: org?.owner_id || null,
     });
   } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 });
+    return erreurServeur('organization/users', err);
   }
 }
 
@@ -147,7 +148,7 @@ export async function POST(req: NextRequest) {
       billing: billingAction ? `Facturation mise à jour (${billingAction})` : 'Inclus dans votre plan'
     }, { status: 201 });
   } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 });
+    return erreurServeur('organization/users', err);
   }
 }
 
@@ -184,7 +185,7 @@ export async function PATCH(req: NextRequest) {
 
     return NextResponse.json({ success: true, message: `Rôle mis à jour en ${role}` });
   } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 });
+    return erreurServeur('organization/users', err);
   }
 }
 
@@ -244,6 +245,6 @@ export async function DELETE(req: NextRequest) {
 
     return NextResponse.json({ success: true });
   } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 });
+    return erreurServeur('organization/users', err);
   }
 }

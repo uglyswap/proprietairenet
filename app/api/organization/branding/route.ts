@@ -3,6 +3,7 @@ import { authenticateRequest } from '@/lib/api-auth';
 import { query } from '@/lib/db';
 import { checkPermission } from '@/lib/permissions';
 import { logAudit, getIpFromRequest } from '@/lib/audit';
+import { erreurServeur } from '@/lib/api-error';
 
 export const dynamic = 'force-dynamic';
 
@@ -18,7 +19,7 @@ export async function GET(req: NextRequest) {
 
     return NextResponse.json({ branding: result.rows[0] || {} });
   } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 });
+    return erreurServeur('organization/branding', err);
   }
 }
 
@@ -46,6 +47,6 @@ export async function PUT(req: NextRequest) {
 
     return NextResponse.json({ success: true, message: 'Branding mis à jour' });
   } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 });
+    return erreurServeur('organization/branding', err);
   }
 }

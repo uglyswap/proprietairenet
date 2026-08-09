@@ -3,6 +3,7 @@ import { authenticateRequest } from '@/lib/api-auth';
 import { query } from '@/lib/db';
 import { checkPermission } from '@/lib/permissions';
 import logger from '@/lib/logger';
+import { erreurServeur } from '@/lib/api-error';
 
 export const dynamic = 'force-dynamic';
 
@@ -65,6 +66,6 @@ export async function GET(req: NextRequest) {
     });
   } catch (err: any) {
     logger.error('AUDIT', 'GET audit log error', { error: err.message });
-    return NextResponse.json({ error: err.message }, { status: 500 });
+    return erreurServeur('audit', err);
   }
 }

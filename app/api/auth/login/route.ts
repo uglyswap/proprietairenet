@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { loginUser } from '@/lib/auth';
 import { checkRateLimit, getClientIP } from '@/lib/rate-limit';
 import logger from '@/lib/logger';
+import { erreurServeur } from '@/lib/api-error';
 
 export const dynamic = 'force-dynamic';
 
@@ -58,10 +59,17 @@ export async function POST(req: NextRequest) {
 
     return response;
   } catch (error: any) {
-    logger.error('AUTH', 'Login error', { error: error.message });
-    return NextResponse.json(
-      { error: error.message || 'Erreur de connexion' },
-      { status: 401 }
-    );
+    logger.error('AUTH', 'Login error', { error: error?.message });
+
+    // Seul le message metier d'echec d'authentification est renvoye tel quel.
+    // Toute autre exception (panne de base, colonne manquante) renvoyait
+    // jusqu'ici son message PostgreSQL au navigateur, avec un statut 401 qui
+    // laissait de surcroit croire a un mauvais mot de passe.
+    const estEchecAuth = error?.message === 'Email ou mot de passe incorrect';
+    if (estEchecAuth) {
+      return NextResponse.json({ error: error.message }, { status: 401 });
+    }
+
+    return erreurServeur('auth/login', error, 'Connexion impossible');
   }
 }

@@ -2,7 +2,14 @@ import { NextRequest, NextResponse } from "next/server";
 import { authenticateRequest, isAdminUser } from "@/lib/api-auth";
 import { query } from "@/lib/db";
 import { textToPdfBase64, replaceVariables } from "@/lib/pdf-generator";
-import { spFetch, isConfigured, getCreditCost, generateCsv } from "@/lib/service-postal";
+import { spFetch, isConfigured, generateCsv } from "@/lib/service-postal";
+import { calculerTarif, TarificationError } from "@/lib/pricing";
+import {
+  chargerOrganisationPourExpedition,
+  resoudreExpediteur,
+  messageExpediteurIncomplet,
+} from "@/lib/expediteur";
+import { erreurServeur } from '@/lib/api-error';
 
 export const dynamic = "force-dynamic";
 
@@ -42,53 +49,59 @@ export async function POST(req: NextRequest) {
 
     const adminBypass = isAdminUser(auth);
 
-    // Check credits (skip for admin)
-    const creditCost = getCreditCost(type_affranchissement) * recipients.length;
-    const orgResult = await query(
-      `SELECT credits_balance, name, address, city, postal_code, country,
-        sender_civilite, sender_first_name, sender_last_name, sender_company,
-        sender_address, sender_address2, sender_postal_code, sender_city, sender_country
-      FROM organizations WHERE id = $1`,
-      [auth.user.organization_id]
+    // Tarification : leve sur type inconnu plutot que de facturer au tarif de la
+    // lettre verte un affranchissement qui coute trois fois plus cher.
+    let tarifUnitaire;
+    try {
+      tarifUnitaire = calculerTarif(type_affranchissement);
+    } catch (err) {
+      if (err instanceof TarificationError) {
+        return NextResponse.json({ error: err.message, code: err.code }, { status: 400 });
+      }
+      throw err;
+    }
+    const creditCost = tarifUnitaire.credits * recipients.length;
+
+    // Le SELECT nommait directement les colonnes sender_*, qui font partie des
+    // colonnes attendues par le code et absentes de la production : la requete
+    // levait un 42703 et le parcours s'arretait ici. On ne demande desormais
+    // que les colonnes reellement presentes.
+    const org = await chargerOrganisationPourExpedition(
+      auth.user.organization_id!,
+      ['credits_balance']
     );
-    const org = orgResult.rows[0];
 
     if (!adminBypass) {
-      if (!org || org.credits_balance < creditCost) {
+      const soldeCourant = Number(org?.credits_balance ?? 0);
+      if (!org || soldeCourant < creditCost) {
         return NextResponse.json({
-          error: `Crédits insuffisants. Besoin: ${creditCost} (${getCreditCost(type_affranchissement)} × ${recipients.length}), Disponible: ${org?.credits_balance || 0}`,
+          error: `Crédits insuffisants. Besoin: ${creditCost} (${tarifUnitaire.credits} × ${recipients.length}), Disponible: ${soldeCourant}`,
           credits_needed: creditCost,
-          credits_available: org?.credits_balance || 0,
+          credits_available: soldeCourant,
         }, { status: 402 });
       }
     }
 
-    // Build sender address: prefer sender_* fields, fallback to org fields
-    const hasSenderProfile = org.sender_address && org.sender_postal_code && org.sender_city;
-    const adresse_expedition: Record<string, string | undefined> = hasSenderProfile
-      ? {
-          civilite: org.sender_civilite || undefined,
-          prenom: org.sender_first_name || undefined,
-          nom: org.sender_last_name || undefined,
-          nom_societe: org.sender_company || undefined,
-          adresse_ligne1: org.sender_address,
-          adresse_ligne2: org.sender_address2 || undefined,
-          code_postal: org.sender_postal_code,
-          ville: org.sender_city,
-          pays: org.sender_country || "FRANCE",
-        }
-      : {
-          nom_societe: org.name || "Proprietaire.net",
-          adresse_ligne1: org.address || "1 rue de la Paix",
-          code_postal: org.postal_code || "75001",
-          ville: org.city || "PARIS",
-          pays: org.country || "France",
-        };
-
-    // Remove undefined values
-    Object.keys(adresse_expedition).forEach((k) => {
-      if (adresse_expedition[k] === undefined) delete adresse_expedition[k];
-    });
+    // Adresse d'expedition : plus aucune valeur inventee.
+    //
+    // La cascade precedente se terminait par "1 rue de la Paix, 75001 PARIS".
+    // Aucune ligne du code deploye n'ecrivant organizations.address, et aucun
+    // ecran ne permettant de la saisir, cette adresse fictive n'etait pas un
+    // cas limite : c'etait le cas nominal pour toutes les organisations. Sur
+    // une lettre recommandee, le retour expediteur est certain et le pli perd
+    // toute valeur juridique.
+    const expediteur = resoudreExpediteur(org);
+    if (!expediteur.ok || !expediteur.adresse) {
+      return NextResponse.json(
+        {
+          error: messageExpediteurIncomplet(expediteur),
+          code: 'EXPEDITEUR_INCOMPLET',
+          champs_manquants: expediteur.manquants,
+        },
+        { status: 422 }
+      );
+    }
+    const adresse_expedition = expediteur.adresse as unknown as Record<string, string | undefined>;
 
     // For each recipient: replace variables in template, generate PDF, call SP
     const results: Array<{ uid: string; recipient_name: string; success: boolean; error?: string }> = [];
@@ -108,8 +121,8 @@ export async function POST(req: NextRequest) {
           bien_adresse: recipient.bien_adresse || '',
           bien_cp: recipient.bien_cp || '',
           bien_ville: recipient.bien_ville || '',
-          expediteur_nom: org.sender_company || org.name || '',
-          expediteur_societe: org.sender_company || org.name || '',
+          expediteur_nom: adresse_expedition.nom_societe || '',
+          expediteur_societe: adresse_expedition.nom_societe || '',
         };
 
         // Replace variables and generate PDF
@@ -204,14 +217,22 @@ export async function POST(req: NextRequest) {
       fail_count: failCount,
       uids: successUids,
       results,
-      credit_cost_per_letter: getCreditCost(type_affranchissement),
-      total_credit_cost: adminBypass ? 0 : getCreditCost(type_affranchissement) * successCount,
+      credit_cost_per_letter: tarifUnitaire.credits,
+      total_credit_cost: adminBypass ? 0 : tarifUnitaire.credits * successCount,
+      // Decomposition rendue visible: cout prestataire, marge, TVA.
+      tarification_unitaire: {
+        cout_prestataire_ht_centimes: tarifUnitaire.cout_prestataire_ht_centimes,
+        marge_ht_centimes: tarifUnitaire.marge_ht_centimes,
+        tva_centimes: tarifUnitaire.tva_centimes,
+        total_ttc_centimes: tarifUnitaire.total_ttc_centimes,
+        marge_pct: tarifUnitaire.marge_pct_effective,
+      },
       message: adminBypass
         ? `${successCount}/${recipients.length} courriers prévisualisés (admin — 0 crédit)`
         : `${successCount}/${recipients.length} courriers prévisualisés avec succès`,
     });
   } catch (err: any) {
     console.error("[COURRIER BULK]", err);
-    return NextResponse.json({ error: err.message || "Erreur serveur" }, { status: 500 });
+    return erreurServeur('courrier/bulk', err);
   }
 }

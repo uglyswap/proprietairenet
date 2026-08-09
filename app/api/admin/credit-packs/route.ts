@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { authenticateRequest } from "@/lib/api-auth";
 import { query } from "@/lib/db";
 import stripe from "@/lib/stripe";
+import { erreurServeur } from '@/lib/api-error';
 
 export const dynamic = "force-dynamic";
 
@@ -14,7 +15,7 @@ export async function GET(req: NextRequest) {
     const result = await query("SELECT * FROM credit_packs ORDER BY sort_order ASC");
     return NextResponse.json({ credit_packs: result.rows });
   } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 });
+    return erreurServeur('admin/credit-packs', err);
   }
 }
 
@@ -56,7 +57,7 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({ credit_pack: result.rows[0] }, { status: 201 });
   } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 });
+    return erreurServeur('admin/credit-packs', err);
   }
 }
 
@@ -101,7 +102,7 @@ export async function PUT(req: NextRequest) {
     const result = await query("SELECT * FROM credit_packs WHERE id = $1", [id]);
     return NextResponse.json({ credit_pack: result.rows[0] });
   } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 });
+    return erreurServeur('admin/credit-packs', err);
   }
 }
 
@@ -118,6 +119,6 @@ export async function DELETE(req: NextRequest) {
     await query("UPDATE credit_packs SET is_active = false, updated_at = now() WHERE id = $1", [id]);
     return NextResponse.json({ success: true });
   } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 });
+    return erreurServeur('admin/credit-packs', err);
   }
 }

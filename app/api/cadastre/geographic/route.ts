@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { authenticateRequest } from '@/lib/api-auth';
 import { query } from '@/lib/db';
 import { logAudit, getIpFromRequest } from "@/lib/audit";
+import { erreurServeur } from '@/lib/api-error';
 
 export const dynamic = 'force-dynamic';
 
@@ -252,10 +253,9 @@ export async function POST(req: NextRequest) {
     });
 
   } catch (error: any) {
-    console.error('[GEO] Error:', error);
     if (error?.name === 'AbortError' || error?.name === 'TimeoutError') {
       return NextResponse.json({ error: 'Délai dépassé côté serveur cadastre' }, { status: 504 });
     }
-    return NextResponse.json({ error: error.message || 'Erreur serveur' }, { status: 500 });
+    return erreurServeur('cadastre/geographic', error);
   }
 }

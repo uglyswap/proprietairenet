@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { authenticateRequest } from "@/lib/api-auth";
+import { erreurServeur } from '@/lib/api-error';
 
 export const dynamic = "force-dynamic";
 
@@ -37,6 +38,6 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ models, count: models.length });
   } catch (err: any) {
     console.error("[AI MODELS]", err);
-    return NextResponse.json({ error: err.message }, { status: 500 });
+    return erreurServeur('admin/ai-models', err);
   }
 }

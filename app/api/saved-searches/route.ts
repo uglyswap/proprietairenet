@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { authenticateRequest } from '@/lib/api-auth';
 import { query } from '@/lib/db';
 import logger from '@/lib/logger';
+import { erreurServeur } from '@/lib/api-error';
 
 export const dynamic = 'force-dynamic';
 
@@ -20,7 +21,7 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ searches: result.rows });
   } catch (err: any) {
     logger.error('SAVED_SEARCH', 'GET error', { error: err.message });
-    return NextResponse.json({ error: err.message }, { status: 500 });
+    return erreurServeur('saved-searches', err);
   }
 }
 
@@ -48,7 +49,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ search: result.rows[0] }, { status: 201 });
   } catch (err: any) {
     logger.error('SAVED_SEARCH', 'POST error', { error: err.message });
-    return NextResponse.json({ error: err.message }, { status: 500 });
+    return erreurServeur('saved-searches', err);
   }
 }
 
@@ -71,6 +72,6 @@ export async function DELETE(req: NextRequest) {
 
     return NextResponse.json({ success: true });
   } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 });
+    return erreurServeur('saved-searches', err);
   }
 }

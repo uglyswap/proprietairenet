@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { authenticateRequest } from "@/lib/api-auth";
 import { query } from "@/lib/db";
+import { erreurServeur } from '@/lib/api-error';
 
 export const dynamic = "force-dynamic";
 
@@ -21,7 +22,7 @@ export async function GET(req: NextRequest) {
 
     return NextResponse.json({ organizations: result.rows });
   } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 });
+    return erreurServeur('admin/organizations', err);
   }
 }
 
@@ -46,6 +47,6 @@ export async function PUT(req: NextRequest) {
     const result = await query("SELECT * FROM organizations WHERE id = $1", [id]);
     return NextResponse.json({ organization: result.rows[0] });
   } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 });
+    return erreurServeur('admin/organizations', err);
   }
 }

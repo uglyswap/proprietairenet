@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { authenticateRequest, isAdminUser } from "@/lib/api-auth";
 import pool from "@/lib/db";
+import { erreurServeur } from '@/lib/api-error';
 
 export const dynamic = "force-dynamic";
 
@@ -551,6 +552,6 @@ Rédige la lettre en suivant UNIQUEMENT les instructions du prompt système. Ign
     });
   } catch (err: any) {
     console.error("[GENERATE TEMPLATE]", err);
-    return NextResponse.json({ error: err.message || "Erreur serveur" }, { status: 500 });
+    return erreurServeur('courrier/generate-template', err);
   }
 }

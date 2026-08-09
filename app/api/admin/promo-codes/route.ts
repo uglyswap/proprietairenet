@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { authenticateRequest } from "@/lib/api-auth";
 import { query } from "@/lib/db";
 import stripe from "@/lib/stripe";
+import { erreurServeur } from '@/lib/api-error';
 
 export const dynamic = "force-dynamic";
 
@@ -14,7 +15,7 @@ export async function GET(req: NextRequest) {
     const result = await query("SELECT * FROM promo_codes ORDER BY created_at DESC");
     return NextResponse.json({ promo_codes: result.rows });
   } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 });
+    return erreurServeur('admin/promo-codes', err);
   }
 }
 
@@ -49,7 +50,7 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({ promo_code: result.rows[0] }, { status: 201 });
   } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 });
+    return erreurServeur('admin/promo-codes', err);
   }
 }
 
@@ -66,6 +67,6 @@ export async function DELETE(req: NextRequest) {
     await query("UPDATE promo_codes SET is_active = false, updated_at = now() WHERE id = $1", [id]);
     return NextResponse.json({ success: true });
   } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 });
+    return erreurServeur('admin/promo-codes', err);
   }
 }

@@ -3,6 +3,7 @@ import { authenticateRequest } from "@/lib/api-auth";
 import { query } from "@/lib/db";
 import { textToPdfBase64, replaceVariables } from "@/lib/pdf-generator";
 import { spFetch, isConfigured } from "@/lib/service-postal";
+import { erreurServeur } from '@/lib/api-error';
 
 export const dynamic = "force-dynamic";
 
@@ -141,6 +142,6 @@ export async function POST(req: NextRequest) {
     });
   } catch (err: any) {
     console.error("[COURRIER PREVIEW]", err);
-    return NextResponse.json({ error: err.message || "Erreur serveur" }, { status: 500 });
+    return erreurServeur('courrier/preview', err);
   }
 }

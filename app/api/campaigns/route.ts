@@ -3,6 +3,7 @@ import { authenticateRequest } from '@/lib/api-auth';
 import { query } from '@/lib/db';
 import { checkPermission } from '@/lib/permissions';
 import { logAudit, getIpFromRequest } from '@/lib/audit';
+import { erreurServeur } from '@/lib/api-error';
 
 export const dynamic = 'force-dynamic';
 
@@ -21,7 +22,7 @@ export async function GET(req: NextRequest) {
 
     return NextResponse.json({ campaigns: result.rows });
   } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 });
+    return erreurServeur('campaigns', err);
   }
 }
 
@@ -59,6 +60,6 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({ campaign: result.rows[0] }, { status: 201 });
   } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 });
+    return erreurServeur('campaigns', err);
   }
 }

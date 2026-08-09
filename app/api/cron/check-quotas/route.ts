@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query } from '@/lib/db';
 import { checkAndSendQuotaAlerts } from '@/lib/quota-alerts';
+import { erreurServeur } from '@/lib/api-error';
 
 export const dynamic = 'force-dynamic';
 
@@ -30,6 +31,6 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ success: true, organizations_checked: checked });
   } catch (err: any) {
     console.error('[CRON CHECK-QUOTAS]', err);
-    return NextResponse.json({ error: err.message }, { status: 500 });
+    return erreurServeur('cron/check-quotas', err);
   }
 }

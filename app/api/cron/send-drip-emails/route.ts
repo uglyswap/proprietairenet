@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { query } from "@/lib/db";
 import { Resend } from "resend";
 import logger from "@/lib/logger";
+import { erreurServeur } from '@/lib/api-error';
 
 export const dynamic = "force-dynamic";
 
@@ -313,6 +314,6 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ success: true, sent: sentCount, failed: failCount, cancelled: cancelledCount });
   } catch (err: any) {
     logger.error("DRIP", "Cron error", { error: err.message });
-    return NextResponse.json({ error: err.message }, { status: 500 });
+    return erreurServeur('cron/send-drip-emails', err);
   }
 }
