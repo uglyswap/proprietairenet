@@ -2,6 +2,9 @@ import { NextRequest, NextResponse } from "next/server";
 import { authenticateRequest, isAdminUser } from "@/lib/api-auth";
 import pool from "@/lib/db";
 import { erreurServeur } from '@/lib/api-error';
+import { randomUUID } from "node:crypto";
+import { withTransaction } from "@/lib/db";
+import { debiterCredits, crediterCredits, CreditsInsuffisantsError } from "@/lib/credits";
 
 export const dynamic = "force-dynamic";
 
@@ -376,6 +379,9 @@ export async function POST(req: NextRequest) {
         const orgId = auth.user.organization_id;
         let aiCharged = false;
 
+        // Reference d'idempotence partagee entre le debit et son remboursement.
+        const referenceIaBase = `ia:${randomUUID()}`;
+
         if (!adminBypass) {
           if (!orgId) {
             return NextResponse.json(
@@ -383,37 +389,59 @@ export async function POST(req: NextRequest) {
               { status: 403 }
             );
           }
-          const deductResult = await pool.query(
-            "UPDATE organizations SET credits_balance = credits_balance - $1, credits_used = credits_used + $1, updated_at = now() WHERE id = $2 AND credits_balance >= $1 RETURNING credits_balance",
-            [AI_GENERATION_CREDIT_COST, orgId]
-          );
-          if (deductResult.rows.length === 0) {
-            return NextResponse.json(
-              {
-                success: false,
-                error: "Crédits insuffisants pour la génération IA.",
-                credits_needed: AI_GENERATION_CREDIT_COST,
-              },
-              { status: 402 }
-            );
-          }
-          aiCharged = true;
+          // Debit et journal dans la MEME transaction.
+          //
+          // La version precedente enchainait un UPDATE du solde puis un INSERT de
+          // journal enveloppe dans son propre try/catch : l'echec du second
+          // laissait des credits debites sans aucune trace. Le remboursement,
+          // lui, n'ecrivait jamais de ligne du tout, ce qui creusait un ecart
+          // permanent et cumulatif sur l'invariant
+          // credits_balance = SUM(credit_transactions.amount).
+          const referenceIa = referenceIaBase;
           try {
-            await pool.query(
-              "INSERT INTO credit_transactions (organization_id, user_id, amount, type, description) VALUES ($1, $2, $3, 'usage', $4)",
-              [orgId, auth.user.id, -AI_GENERATION_CREDIT_COST, "Génération IA template courrier"]
+            await withTransaction((client) =>
+              debiterCredits(client, {
+                organizationId: orgId,
+                userId: auth.user.id,
+                montant: AI_GENERATION_CREDIT_COST,
+                type: 'usage',
+                description: 'Génération IA template courrier',
+                reference: referenceIaBase,
+              })
             );
-          } catch (txErr) { console.error('[AI CREDIT TX]', txErr); }
+            aiCharged = true;
+          } catch (err) {
+            if (err instanceof CreditsInsuffisantsError) {
+              return NextResponse.json(
+                {
+                  success: false,
+                  error: "Crédits insuffisants pour la génération IA.",
+                  credits_needed: AI_GENERATION_CREDIT_COST,
+                  credits_available: err.disponible,
+                },
+                { status: 402 }
+              );
+            }
+            throw err;
+          }
         }
 
         // Rembourse le debit IA si la generation echoue (skip admin).
+        // Le remboursement ecrit sa propre ligne de journal : sans elle, le solde
+        // cessait d'etre reconstructible des la premiere generation ratee.
         const refundAiCredits = async () => {
           if (aiCharged && orgId) {
             aiCharged = false;
             try {
-              await pool.query(
-                "UPDATE organizations SET credits_balance = credits_balance + $1, credits_used = credits_used - $1, updated_at = now() WHERE id = $2",
-                [AI_GENERATION_CREDIT_COST, orgId]
+              await withTransaction((client) =>
+                crediterCredits(client, {
+                  organizationId: orgId,
+                  userId: auth.user.id,
+                  montant: AI_GENERATION_CREDIT_COST,
+                  type: 'refund',
+                  description: 'Remboursement génération IA (échec)',
+                  reference: `refund:${referenceIaBase}`,
+                })
               );
             } catch (refundErr) { console.error('[AI CREDIT REFUND]', refundErr); }
           }

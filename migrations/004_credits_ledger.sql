@@ -74,10 +74,21 @@ ALTER TABLE public.credit_transactions
 -- -----------------------------------------------------------------------------
 
 -- Unicite de la reference : c'est ce qui garantit l'idempotence.
--- Index partiel : les lignes historiques sans reference ne sont pas contraintes.
+--
+-- L'index est TOTAL et non partiel, volontairement.
+-- PostgreSQL n'accepte un index partiel comme arbitre de `ON CONFLICT` que si
+-- le predicat de l'index est repete dans la clause. Avec un index partiel et un
+-- simple `ON CONFLICT (reference)`, la planification leve
+-- 42P10 « there is no unique or exclusion constraint matching the ON CONFLICT
+-- specification » a CHAQUE insertion referencee, qu'il y ait conflit ou non :
+-- tout le circuit d'argent tomberait au moment precis ou l'on applique cette
+-- migration.
+--
+-- Un index unique total convient parfaitement ici : en SQL, plusieurs NULL ne
+-- se contredisent pas, les lignes historiques sans reference restent donc
+-- toutes acceptees.
 CREATE UNIQUE INDEX IF NOT EXISTS credit_transactions_reference_key
-  ON public.credit_transactions (reference)
-  WHERE reference IS NOT NULL;
+  ON public.credit_transactions (reference);
 
 -- Reconciliation et affichage de l'historique par organisation.
 CREATE INDEX IF NOT EXISTS idx_credit_transactions_org_date

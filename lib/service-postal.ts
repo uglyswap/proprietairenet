@@ -35,11 +35,51 @@ export async function spFetch(path: string, options: RequestInit = {}): Promise<
  */
 export { getCreditCost, TYPES_AFFRANCHISSEMENT } from './pricing';
 
-import { baremeComplet } from './pricing';
+import { baremeComplet, TYPES_AFFRANCHISSEMENT as TYPES } from './pricing';
 
-/** Bareme en credits, calcule et non plus code en dur. */
-export const CREDIT_COSTS: Record<string, number> = Object.fromEntries(
-  baremeComplet().map((tarif) => [tarif.type_affranchissement, tarif.credits])
+/**
+ * Bareme en credits, calcule et non plus code en dur.
+ *
+ * Le calcul est PARESSEUX. L'evaluer au chargement du module faisait dependre
+ * l'import lui-meme de la configuration : une seule variable tarifaire mal
+ * renseignee levait a l'import et mettait hors service toutes les routes
+ * courrier, y compris celles qui n'ont pas besoin du bareme. Une erreur de
+ * configuration ne doit degrader que ce qui en depend.
+ */
+let baremeCache: Record<string, number> | null = null;
+
+export function getCreditCosts(): Record<string, number> {
+  if (baremeCache) return baremeCache;
+  try {
+    baremeCache = Object.fromEntries(
+      baremeComplet().map((tarif) => [tarif.type_affranchissement, tarif.credits])
+    );
+  } catch (err) {
+    console.error(
+      '[TARIFICATION] Bareme incalculable, verifier la configuration COURRIER_*',
+      err
+    );
+    baremeCache = {};
+  }
+  return baremeCache;
+}
+
+/**
+ * Conserve pour les appelants existants. Accede au bareme paresseux : la lecture
+ * d'une cle absente vaut undefined, comme avant, sans faire echouer l'import.
+ */
+export const CREDIT_COSTS: Record<string, number> = new Proxy(
+  {} as Record<string, number>,
+  {
+    get: (_cible, propriete: string) => getCreditCosts()[propriete],
+    ownKeys: () => Reflect.ownKeys(getCreditCosts()),
+    has: (_cible, propriete: string) => propriete in getCreditCosts(),
+    getOwnPropertyDescriptor: (_cible, propriete: string) => ({
+      value: getCreditCosts()[propriete as string],
+      enumerable: true,
+      configurable: true,
+    }),
+  }
 );
 
 /**

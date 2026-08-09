@@ -77,8 +77,26 @@ let avertissementIpEmis = false;
  * effectif par compte, ce qui est de toute facon la dimension pertinente pour
  * une attaque par force brute, sans jamais devenir global.
  */
-function construireCle(ip: string, action: string, discriminant?: string): string {
-  if (ip !== 'unknown') return `${action}:${ip}`;
+/**
+ * Facteur applique a l'allocation quand le comptage se fait par compte et non
+ * par adresse IP.
+ *
+ * Un compteur par email est indispensable quand l'IP n'est pas resoluble, mais
+ * il ouvre un autre abus : un tiers peut verrouiller le compte d'une victime en
+ * saturant deliberement sa cle. Elargir l'allocation rend ce verrouillage
+ * beaucoup plus couteux tout en conservant une protection reelle contre la
+ * force brute, qui exige, elle, des milliers de tentatives.
+ */
+const FACTEUR_CLE_PAR_COMPTE = 4;
+
+interface CleComptage {
+  cle: string;
+  /** Multiplicateur applique a maxAttempts pour cette cle. */
+  facteur: number;
+}
+
+function construireCle(ip: string, action: string, discriminant?: string): CleComptage {
+  if (ip !== 'unknown') return { cle: `${action}:${ip}`, facteur: 1 };
 
   if (!avertissementIpEmis) {
     avertissementIpEmis = true;
@@ -90,12 +108,21 @@ function construireCle(ip: string, action: string, discriminant?: string): strin
   }
 
   if (discriminant) {
-    return `${action}:id:${discriminant.trim().toLowerCase()}`;
+    return {
+      cle: `${action}:id:${discriminant.trim().toLowerCase()}`,
+      facteur: FACTEUR_CLE_PAR_COMPTE,
+    };
   }
 
-  // Sans discriminant, un compteur global rebloquerait tout le monde : on
-  // preferere ne pas limiter plutot que de provoquer un deni de service.
-  return `${action}:unbounded:${Math.random()}`;
+  // Dernier recours : ni IP ni discriminant.
+  //
+  // Une cle aleatoire annulerait purement la limitation, ce qui laissait
+  // /auth/register et /auth/forgot-password sans aucune protection. Un compteur
+  // global avec l'allocation nominale rebloquerait au contraire tous les
+  // utilisateurs des cinq premiers echecs. On garde donc un compteur global mais
+  // tres large : il arrete un abus massif sans pouvoir servir de deni de service
+  // cible.
+  return { cle: `${action}:global`, facteur: 20 };
 }
 
 export function checkRateLimit(
@@ -103,10 +130,14 @@ export function checkRateLimit(
   action: string,
   discriminant?: string
 ): { allowed: boolean; retryAfter?: number } {
-  const config = RATE_LIMITS[action];
-  if (!config) return { allowed: true };
+  const configBase = RATE_LIMITS[action];
+  if (!configBase) return { allowed: true };
 
-  const key = construireCle(ip, action, discriminant);
+  const { cle: key, facteur } = construireCle(ip, action, discriminant);
+  const config = {
+    windowMs: configBase.windowMs,
+    maxAttempts: configBase.maxAttempts * facteur,
+  };
   const now = Date.now();
   const entry = rateLimitMap.get(key);
 

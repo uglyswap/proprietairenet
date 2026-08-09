@@ -36,6 +36,7 @@ import { authenticateRequest, isAdminUser } from "@/lib/api-auth";
 import { checkPermission } from "@/lib/permissions";
 import { query, withTransaction, getColonnes } from "@/lib/db";
 import { spFetch, isConfigured } from "@/lib/service-postal";
+import { marquerStatutPli } from "@/lib/mail-history";
 import { calculerTarif, TarificationError, DecompositionTarifaire } from "@/lib/pricing";
 import {
   debiterCredits,
@@ -62,9 +63,13 @@ async function majContactCrm(orgId: string, userId: string, dest: Record<string,
   );
 
   if (existing.rows.length > 0) {
-    const majs = ["updated_at = now()"];
+    // contacts n'a PAS de colonne updated_at en production : la nommer en dur
+    // faisait echouer chaque mise a jour de contact existant.
+    const majs: string[] = [];
+    if (existantes.has("updated_at")) majs.push("updated_at = now()");
     if (existantes.has("mail_count")) majs.push("mail_count = COALESCE(mail_count, 0) + 1");
     if (existantes.has("last_contacted_at")) majs.push("last_contacted_at = now()");
+    if (majs.length === 0) return;
     await query(`UPDATE contacts SET ${majs.join(", ")} WHERE id = $1`, [existing.rows[0].id]);
     return;
   }
@@ -244,8 +249,13 @@ export async function POST(req: NextRequest) {
 
         if (!spResponse.ok) {
           if (debite) {
-            await rembourser(orgId, auth.user.id, tarif.credits, uid, "Refus du prestataire");
+            await rembourser(orgId, auth.user.id, tarif.credits, uid, "Refus du prestataire", tarif.total_ttc_centimes);
           }
+          // Le pli DOIT quitter l'etat 'preview'. Sans cela il restait
+          // selectionnable par une nouvelle validation : la reference
+          // d'idempotence `courrier:<uid>` existant deja, aucun debit n'aurait
+          // lieu, et le pli serait imprime et poste GRATUITEMENT.
+          await sortirDeLaPrevisualisation(uid, orgId);
           resultats.push({
             uid,
             success: false,
@@ -257,8 +267,11 @@ export async function POST(req: NextRequest) {
         }
       } catch (err) {
         if (debite) {
-          await rembourser(orgId, auth.user.id, tarif.credits, uid, "Echec reseau");
+          await rembourser(orgId, auth.user.id, tarif.credits, uid, "Echec reseau", tarif.total_ttc_centimes);
         }
+        // Meme raison que ci-dessus : ne jamais laisser un pli rembourse
+        // revalidable sans debit.
+        await sortirDeLaPrevisualisation(uid, orgId);
         resultats.push({ uid, success: false, error: "Service postal injoignable" });
         console.error(`[COURRIER lot=${lotId}] Reseau uid=${uid}`, err);
         continue;
@@ -268,12 +281,7 @@ export async function POST(req: NextRequest) {
       creditsConsommes += adminBypass ? 0 : tarif.credits;
 
       try {
-        await query(
-          `UPDATE mail_history
-              SET status = 'sent', credits_used = $1, sent_at = now(), updated_at = now()
-            WHERE service_postal_uid = $2 AND organization_id = $3`,
-          [adminBypass ? 0 : tarif.credits, uid, orgId]
-        );
+        await marquerStatutPli(uid, orgId, 'sent', adminBypass ? 0 : tarif.credits);
       } catch (err) {
         avertissements.push(`Pli ${uid} envoyé mais non enregistré dans l'historique.`);
         console.error(
@@ -317,13 +325,30 @@ export async function POST(req: NextRequest) {
   }
 }
 
+/**
+ * Sort un pli de l'etat 'preview' apres un echec.
+ * C'est ce qui empeche une revalidation de le poster sans nouveau debit.
+ */
+async function sortirDeLaPrevisualisation(uid: string, orgId: string): Promise<void> {
+  try {
+    await marquerStatutPli(uid, orgId, 'refunded', 0);
+  } catch (err) {
+    console.error(
+      `[COURRIER] Pli ${uid} laisse en previsualisation apres echec : ` +
+        `il pourrait etre revalide sans debit, verification manuelle requise`,
+      err
+    );
+  }
+}
+
 /** Remboursement journalise et idempotent d'un pli non parti. */
 async function rembourser(
   orgId: string,
   userId: string,
   credits: number,
   uid: string,
-  motif: string
+  motif: string,
+  montantEurCentimes?: number
 ): Promise<void> {
   try {
     await withTransaction((client) =>
@@ -334,6 +359,9 @@ async function rembourser(
         type: "refund",
         description: `Remboursement courrier ${uid} : ${motif}`,
         reference: `refund:${uid}`,
+        // Signe negatif : un remboursement diminue le chiffre d'affaires.
+        montantEurCentimes:
+          montantEurCentimes !== undefined ? -Math.abs(montantEurCentimes) : undefined,
         metadata: { uid, motif },
       })
     );

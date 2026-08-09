@@ -14,9 +14,18 @@ function isPasswordValid(password: string): boolean {
 
 export async function POST(req: NextRequest) {
   try {
-    // Rate limiting
+    // Le corps est lu AVANT le controle de debit pour fournir l'adresse email
+    // comme discriminant. Sans elle, et quand l'IP n'est pas resoluble, le
+    // comptage retombait sur une cle aleatoire, donc sur aucune limitation.
+    const body = await req.json();
+    const { email, password, first_name, last_name } = body;
+
     const ip = getClientIP(req);
-    const rateCheck = checkRateLimit(ip, 'register');
+    const rateCheck = checkRateLimit(
+      ip,
+      'register',
+      typeof email === 'string' ? email : undefined
+    );
     if (!rateCheck.allowed) {
       logger.warn('AUTH', `Rate limit exceeded for register`, { ip, retryAfter: rateCheck.retryAfter });
       return NextResponse.json(
@@ -24,9 +33,6 @@ export async function POST(req: NextRequest) {
         { status: 429, headers: { 'Retry-After': String(rateCheck.retryAfter) } }
       );
     }
-
-    const body = await req.json();
-    const { email, password, first_name, last_name } = body;
 
     if (!email || !password) {
       return NextResponse.json({ error: 'Email et mot de passe requis' }, { status: 400 });

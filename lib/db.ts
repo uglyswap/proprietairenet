@@ -35,11 +35,22 @@ export async function query(text: string, params?: any[]) {
  * d'echouer. Il ne remplace pas les migrations : il evite qu'une migration
  * manquante se traduise par une perte d'argent ou une panne silencieuse.
  */
-const colonnesParTable = new Map<string, Set<string>>();
+const colonnesParTable = new Map<string, { colonnes: Set<string>; expire: number }>();
+
+/**
+ * Duree de vie du cache.
+ *
+ * Sans expiration, un processus deja demarre continuait de servir l'ancien
+ * schema APRES l'application d'une migration : les nouvelles colonnes restaient
+ * invisibles jusqu'au redemarrage, ce qui annulait silencieusement le benefice
+ * de la migration. Cinq minutes suffisent a amortir le cout d'introspection
+ * tout en faisant converger les processus sans intervention.
+ */
+const TTL_INTROSPECTION_MS = Number(process.env.SCHEMA_CACHE_TTL_MS ?? 5 * 60 * 1000);
 
 export async function getColonnes(table: string): Promise<Set<string>> {
   const cache = colonnesParTable.get(table);
-  if (cache) return cache;
+  if (cache && cache.expire > Date.now()) return cache.colonnes;
 
   const result = await query(
     `SELECT column_name
@@ -51,7 +62,10 @@ export async function getColonnes(table: string): Promise<Set<string>> {
   const colonnes = new Set<string>(
     result.rows.map((r: { column_name: string }) => r.column_name)
   );
-  colonnesParTable.set(table, colonnes);
+  colonnesParTable.set(table, {
+    colonnes,
+    expire: Date.now() + TTL_INTROSPECTION_MS,
+  });
   return colonnes;
 }
 

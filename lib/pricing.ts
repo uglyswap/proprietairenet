@@ -30,14 +30,43 @@
 /** Un credit vaut un centime d'euro. */
 export const CENTIMES_PAR_CREDIT = 1;
 
+/**
+ * Lecture sure d'une variable d'environnement numerique.
+ *
+ * `Number('abc')` vaut NaN, et toute comparaison impliquant NaN est fausse :
+ * `margePct < MARGE_MIN_PCT` renvoyait donc false, et le garde-fou de marge
+ * minimale etait CONTOURNE par une simple faute de frappe dans la
+ * configuration. Une valeur invalide est desormais ignoree au profit du defaut,
+ * avec un avertissement.
+ */
+function nombreEnv(nom: string, defaut: number): number {
+  const brut = process.env[nom];
+  if (brut === undefined || brut === null || brut.trim() === '') return defaut;
+
+  const valeur = Number(brut);
+  if (!Number.isFinite(valeur)) {
+    console.warn(
+      `[TARIFICATION] ${nom}="${brut}" n'est pas un nombre : valeur par defaut ${defaut} retenue.`
+    );
+    return defaut;
+  }
+  if (valeur < 0) {
+    console.warn(
+      `[TARIFICATION] ${nom}=${valeur} est negatif : valeur par defaut ${defaut} retenue.`
+    );
+    return defaut;
+  }
+  return valeur;
+}
+
 /** Taux de TVA applicable a la prestation, en pourcentage. */
-const TVA_PCT = Number(process.env.COURRIER_TVA_PCT ?? '20');
+const TVA_PCT = nombreEnv('COURRIER_TVA_PCT', 20);
 
 /**
  * Marge fixe ajoutee a chaque pli, en centimes HT.
  * Valeur historique : 100 centimes, soit 1 EUR HT par pli.
  */
-const MARGE_FIXE_HT_CENTIMES = Number(process.env.COURRIER_MARGE_FIXE_HT_CENTIMES ?? '100');
+const MARGE_FIXE_HT_CENTIMES = nombreEnv('COURRIER_MARGE_FIXE_HT_CENTIMES', 100);
 
 /**
  * Marge proportionnelle au cout prestataire, en pourcentage.
@@ -45,14 +74,14 @@ const MARGE_FIXE_HT_CENTIMES = Number(process.env.COURRIER_MARGE_FIXE_HT_CENTIME
  * non nulle protege la marge d'une hausse tarifaire du prestataire, ce que la
  * marge fixe seule ne fait pas.
  */
-const MARGE_PCT = Number(process.env.COURRIER_MARGE_PCT ?? '0');
+const MARGE_PCT = nombreEnv('COURRIER_MARGE_PCT', 0);
 
 /**
  * Marge minimale acceptable, en pourcentage du cout prestataire.
  * En dessous, l'envoi est refuse plutot que vendu a perte. C'est le garde-fou
  * qui manquait : rien ne detectait une marge devenue negative.
  */
-const MARGE_MIN_PCT = Number(process.env.COURRIER_MARGE_MIN_PCT ?? '5');
+const MARGE_MIN_PCT = nombreEnv('COURRIER_MARGE_MIN_PCT', 5);
 
 /**
  * Cout facture par Service Postal, en centimes HT, impression comprise.
@@ -107,10 +136,14 @@ export class TarificationError extends Error {
 
 /** Cout prestataire d'un type d'affranchissement, ou null s'il est inconnu. */
 function coutPrestataire(type: string): number | null {
-  const surcharge = process.env[`COURRIER_COUT_HT_${type.toUpperCase()}`];
-  if (surcharge !== undefined) {
+  const nomVariable = `COURRIER_COUT_HT_${type.toUpperCase()}`;
+  const surcharge = process.env[nomVariable];
+  if (surcharge !== undefined && surcharge.trim() !== '') {
     const valeur = Number(surcharge);
     if (Number.isFinite(valeur) && valeur > 0) return valeur;
+    console.warn(
+      `[TARIFICATION] ${nomVariable}="${surcharge}" invalide : bareme de reference conserve.`
+    );
   }
   return COUT_PRESTATAIRE_HT_CENTIMES[type] ?? null;
 }
@@ -140,6 +173,15 @@ export function calculerTarif(type_affranchissement: string): DecompositionTarif
   const tva = totalTtc - Math.round(totalHt);
 
   const margePctEffective = coutHt > 0 ? (margeHt / coutHt) * 100 : 0;
+
+  // Un calcul non fini ne doit jamais franchir le garde-fou : toute comparaison
+  // impliquant NaN est fausse, y compris `< MARGE_MIN_PCT`.
+  if (!Number.isFinite(totalTtc) || !Number.isFinite(margeHt) || totalTtc <= 0) {
+    throw new TarificationError(
+      `Tarification non calculable pour ${type} (configuration invalide).`,
+      'TARIFICATION_INVALIDE'
+    );
+  }
 
   // Garde-fou : on ne vend jamais un pli en dessous de son cout de revient.
   if (margeHt <= 0 || margePctEffective < MARGE_MIN_PCT) {

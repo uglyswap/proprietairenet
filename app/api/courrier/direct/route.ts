@@ -135,9 +135,13 @@ async function majContactCrm(
   );
 
   if (existing.rows.length > 0) {
-    const majs = ["updated_at = now()"];
+    // contacts n'a PAS de colonne updated_at en production : la nommer en dur
+    // faisait echouer chaque mise a jour de contact existant.
+    const majs: string[] = [];
+    if (existantes.has("updated_at")) majs.push("updated_at = now()");
     if (existantes.has("mail_count")) majs.push("mail_count = COALESCE(mail_count, 0) + 1");
     if (existantes.has("last_contacted_at")) majs.push("last_contacted_at = now()");
+    if (majs.length === 0) return;
     await query(`UPDATE contacts SET ${majs.join(", ")} WHERE id = $1`, [
       existing.rows[0].id,
     ]);
@@ -169,7 +173,16 @@ async function majContactCrm(
 }
 
 export async function POST(req: NextRequest) {
-  const envoiId = randomUUID();
+  // Identifiant d'envoi.
+  //
+  // Genere ici, il change a chaque requete : la reference `courrier:<envoiId>`
+  // ne protegeait donc de rien. Un client qui relance sa requete apres un
+  // timeout obtenait un second debit ET un second pli reellement poste.
+  //
+  // L'appelant peut desormais fournir sa propre cle via l'en-tete
+  // Idempotency-Key ou le champ `idempotency_key` du corps. Deux tentatives
+  // portant la meme cle ne produisent alors qu'un seul debit.
+  const cleEnteteIdempotence = req.headers.get('idempotency-key');
   const avertissements: string[] = [];
 
   try {
@@ -190,6 +203,10 @@ export async function POST(req: NextRequest) {
     }
 
     const body = await req.json();
+    const envoiId =
+      cleEnteteIdempotence?.trim() ||
+      (typeof body?.idempotency_key === 'string' && body.idempotency_key.trim()) ||
+      randomUUID();
     const {
       adresse_destination,
       fichier,
@@ -325,7 +342,7 @@ export async function POST(req: NextRequest) {
       // l'utilisateur face a un debit sans reponse.
       if (!adminBypass) {
         await rembourser(organizationId, auth.user.id, tarif.credits, envoiId,
-          "Echec reseau vers le prestataire").catch((e) =>
+          "Echec reseau vers le prestataire", tarif.total_ttc_centimes).catch((e) =>
           console.error(`[COURRIER ${envoiId}] Remboursement impossible`, e)
         );
       }
@@ -345,7 +362,7 @@ export async function POST(req: NextRequest) {
     if (!spOk) {
       if (!adminBypass) {
         await rembourser(organizationId, auth.user.id, tarif.credits, envoiId,
-          "Refus du prestataire").catch((e) =>
+          "Refus du prestataire", tarif.total_ttc_centimes).catch((e) =>
           console.error(`[COURRIER ${envoiId}] Remboursement impossible`, e)
         );
       }
@@ -447,9 +464,10 @@ export async function POST(req: NextRequest) {
   } catch (err) {
     // Toute exception non rattrapee arrive ici AVANT l'envoi : les phases 2 et 3
     // gerent elles-memes leurs echecs. Aucun remboursement a faire ici.
-    console.error(`[COURRIER ${envoiId}]`, err);
+    const reference = cleEnteteIdempotence || 'sans-cle';
+    console.error(`[COURRIER ${reference}]`, err);
     return NextResponse.json(
-      { error: "Erreur serveur", envoi_id: envoiId },
+      { error: "Erreur serveur", envoi_id: reference },
       { status: 500 }
     );
   }
@@ -461,7 +479,8 @@ async function rembourser(
   userId: string,
   credits: number,
   envoiId: string,
-  motif: string
+  motif: string,
+  montantEurCentimes?: number
 ): Promise<void> {
   await withTransaction((client) =>
     crediterCredits(client, {
@@ -471,6 +490,11 @@ async function rembourser(
       type: "refund",
       description: `Remboursement courrier (envoi ${envoiId}) : ${motif}`,
       reference: `refund:${envoiId}`,
+      // Signe negatif : un remboursement DIMINUE le chiffre d'affaires. Sans ce
+      // montant, la vue de revenus comptait le pli comme encaisse alors qu'il
+      // avait ete rembourse.
+      montantEurCentimes:
+        montantEurCentimes !== undefined ? -Math.abs(montantEurCentimes) : undefined,
       metadata: { envoi_id: envoiId, motif },
     })
   );

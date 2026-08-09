@@ -204,6 +204,26 @@ function TypeBadge({ type }: { type: string | null | undefined }) {
 }
 
 /**
+ * Formate une date AAAA-MM-JJ en JJ/MM/AAAA sans passer par Date.
+ *
+ * `new Date('2024-03-15')` est interprete comme minuit UTC : dans un fuseau
+ * negatif, toLocaleDateString affichait la veille. L'ecran et le CSV, qui
+ * exporte la chaine brute, ne concordaient donc pas.
+ */
+function formaterDateFr(valeur: unknown): string {
+  if (!valeur) return ''
+  const m = String(valeur).match(/^(\d{4})-(\d{2})-(\d{2})/)
+  if (!m) return String(valeur)
+  return `${m[3]}/${m[2]}/${m[1]}`
+}
+
+/** Formate un nombre en francais, ou chaine vide si la valeur n'est pas un nombre. */
+function formaterNombre(valeur: unknown): string {
+  const n = typeof valeur === 'number' ? valeur : Number(valeur)
+  return Number.isFinite(n) ? n.toLocaleString('fr-FR') : ''
+}
+
+/**
  * Corps attendu par POST /api/lists/items, seul endpoint d'ajout reellement
  * implemente.
  */
@@ -413,24 +433,58 @@ export default function ResultsList({ results, onExport, onReveal, onCreditsUpda
   const handleCreateListAndAdd = async () => {
     if (!newListName.trim() || !addToListResult) return
     try {
+      // POST /api/lists ne lit QUE `name` : le champ `results` etait ignore, et
+      // le message de succes annoncait donc un ajout qui n'avait jamais eu lieu.
+      // La creation et l'ajout sont deux appels distincts.
       const res = await fetch('/api/lists', {
         method: 'POST',
         headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: newListName, results: [addToListResult] })
+        body: JSON.stringify({ name: newListName })
       })
-      if (res.ok) {
-        toast.success(`Liste "${newListName}" créée et résultat ajouté !`)
-        setAddToListResult(null)
-        setNewListName('')
-      } else {
-        toast.error('Erreur lors de la création')
+
+      if (!res.ok) {
+        toast.error('Erreur lors de la création de la liste')
+        return
       }
+
+      const data = await res.json()
+      const listId = data.list?.id
+      if (!listId) {
+        toast.error('Liste créée mais identifiant introuvable')
+        return
+      }
+
+      const ajoute = await addResultToList(listId, addToListResult)
+      if (ajoute) {
+        toast.success(`Liste "${newListName}" créée et résultat ajouté`)
+      } else {
+        // La liste existe : on le dit, plutot que d'annoncer un ajout absent.
+        toast.warning(`Liste "${newListName}" créée, mais le résultat n'a pas pu y être ajouté`)
+      }
+
+      setAddToListResult(null)
+      setNewListName('')
+      fetchLists()
     } catch { toast.error('Erreur réseau') }
   }
 
   const exportSingleResult = (result: CadastreResult) => {
     const e = (result as any).enrichissement || {}
-    const prop = result.proprietes?.[0]
+    // La ligne exportee melangeait la reference cadastrale de proprietes[0] avec
+    // la vente et la surface d'une AUTRE parcelle, celle retenue comme
+    // principale. On exporte desormais la parcelle qui porte reellement cet
+    // enrichissement.
+    const prop =
+      (result.proprietes || []).find(
+        (p: any) => p.enrichissement && p.enrichissement === e
+      ) ||
+      (result.proprietes || []).find(
+        (p: any) =>
+          p.enrichissement &&
+          e.surface_parcelle != null &&
+          p.enrichissement.surface_parcelle === e.surface_parcelle
+      ) ||
+      result.proprietes?.[0]
     const sep = ';'
     // Neutralise l'injection de formule CSV (Excel/Sheets) : prefixe ' si la
     // valeur commence par un caractere declencheur de formule.
@@ -457,7 +511,7 @@ export default function ResultsList({ results, onExport, onReveal, onCreditsUpda
       sanitizeCsvCell(prop?.reference_cadastrale || ''),
       sanitizeCsvCell((prop as any)?.idu || ''),
       sanitizeCsvCell(e.surface_parcelle || ''),
-      sanitizeCsvCell(e.derniere_vente?.date || e.date_derniere_transaction || ''),
+      sanitizeCsvCell(e.derniere_vente?.date || e.date_derniere_transaction || ''),  // AAAA-MM-JJ
       sanitizeCsvCell(e.derniere_vente?.prix ?? e.prix_derniere_vente ?? ''),
       esc(e.derniere_vente?.nature || ''),
       sanitizeCsvCell(e.prix_m2 || ''),
@@ -754,11 +808,11 @@ export default function ResultsList({ results, onExport, onReveal, onCreditsUpda
                           <div className="flex flex-wrap items-baseline gap-x-2">
                             <span className="text-muted-foreground">Dernière vente :</span>
                             <span className="text-base font-bold text-indigo-700 dark:text-indigo-300">
-                              {Number(enrichissement.derniere_vente.prix).toLocaleString('fr-FR')} €
+                              {formaterNombre(enrichissement.derniere_vente.prix)} €
                             </span>
                             {enrichissement.derniere_vente.date && (
                               <span className="text-muted-foreground">
-                                le {new Date(enrichissement.derniere_vente.date).toLocaleDateString('fr-FR')}
+                                le {formaterDateFr(enrichissement.derniere_vente.date)}
                               </span>
                             )}
                           </div>
@@ -795,20 +849,20 @@ export default function ResultsList({ results, onExport, onReveal, onCreditsUpda
                           <div>
                             <span className="text-muted-foreground">Prix au m² :</span>{' '}
                             <span className="font-semibold text-indigo-700 dark:text-indigo-400">
-                              {Number(enrichissement.prix_m2).toLocaleString('fr-FR')} €
+                              {formaterNombre(enrichissement.prix_m2)} €
                             </span>
                           </div>
                         ) : null}
                         {enrichissement.derniere_vente?.surface_bati ? (
                           <div>
                             <span className="text-muted-foreground">Surface bâtie vendue :</span>{' '}
-                            {Number(enrichissement.derniere_vente.surface_bati).toLocaleString('fr-FR')} m²
+                            {formaterNombre(enrichissement.derniere_vente.surface_bati)} m²
                           </div>
                         ) : null}
                         {enrichissement.derniere_vente?.surface_terrain ? (
                           <div>
                             <span className="text-muted-foreground">Terrain :</span>{' '}
-                            {Number(enrichissement.derniere_vente.surface_terrain).toLocaleString('fr-FR')} m²
+                            {formaterNombre(enrichissement.derniere_vente.surface_terrain)} m²
                           </div>
                         ) : null}
                         {enrichissement.derniere_vente?.nombre_pieces ? (
@@ -839,14 +893,14 @@ export default function ResultsList({ results, onExport, onReveal, onCreditsUpda
                                 .map((v: any, i: number) => (
                                   <div key={i} className="flex flex-wrap items-baseline gap-x-2">
                                     <span className="font-mono text-[11px]">
-                                      {v.date ? new Date(v.date).toLocaleDateString('fr-FR') : '—'}
+                                      {formaterDateFr(v.date) || '—'}
                                     </span>
                                     <span className="font-semibold">
-                                      {Number(v.prix).toLocaleString('fr-FR')} €
+                                      {formaterNombre(v.prix)} €
                                     </span>
                                     {v.prix_m2 ? (
                                       <span className="text-muted-foreground">
-                                        {Number(v.prix_m2).toLocaleString('fr-FR')} €/m²
+                                        {formaterNombre(v.prix_m2)} €/m²
                                       </span>
                                     ) : null}
                                     {v.nature && (
@@ -858,12 +912,15 @@ export default function ResultsList({ results, onExport, onReveal, onCreditsUpda
                           </div>
                         )}
 
-                      {/* Une source indisponible n'est pas une absence de donnee. */}
-                      {enrichissement.sources && enrichissement.sources.dvf === false && (
-                        <div className="mt-2 text-[11px] text-amber-700 dark:text-amber-400">
-                          Données de ventes temporairement indisponibles.
-                        </div>
-                      )}
+                    </div>
+                  )}
+
+                  {/* Source DVF en echec : le message doit s'afficher MEME quand
+                      le bloc ci-dessus est masque, ce qui est justement le cas
+                      lorsqu'aucune donnee de vente n'a pu etre lue. */}
+                  {enrichissement?.sources && enrichissement.sources.dvf === false && (
+                    <div className="mt-2 text-[11px] text-amber-700 dark:text-amber-400">
+                      Données de ventes temporairement indisponibles : le prix affiché peut être incomplet.
                     </div>
                   )}
 

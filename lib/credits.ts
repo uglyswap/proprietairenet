@@ -87,6 +87,8 @@ export class CreditsInsuffisantsError extends Error {
 
 interface SchemaCredits {
   reference: boolean;
+  /** True seulement si un index unique NON PARTIEL couvre `reference`. */
+  referenceIndexUtilisable: boolean;
   balanceAfter: boolean;
   metadata: boolean;
   amountEurCentimes: boolean;
@@ -105,8 +107,49 @@ async function detecterSchema(): Promise<SchemaCredits> {
   );
   const colonnes = new Set(res.rows.map((r: { column_name: string }) => r.column_name));
 
+  // La presence de la colonne ne suffit PAS a autoriser `ON CONFLICT`.
+  //
+  // PostgreSQL n'accepte un index partiel comme arbitre de conflit que si le
+  // predicat de l'index est repete dans la clause. Avec un index partiel et un
+  // simple `ON CONFLICT (reference)`, la planification leve 42P10 a CHAQUE
+  // insertion referencee, qu'il y ait conflit ou non : le circuit d'argent
+  // tomberait integralement.
+  //
+  // On verifie donc qu'il existe un index UNIQUE, NON PARTIEL, portant
+  // exactement la colonne `reference`. A defaut, on retombe sur l'idempotence
+  // par pre-lecture, qui reste correcte a l'interieur d'une transaction.
+  let indexUtilisable = false;
+  if (colonnes.has('reference')) {
+    const idx = await query(
+      `SELECT 1
+         FROM pg_index i
+         JOIN pg_class c   ON c.oid = i.indrelid
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'public'
+          AND c.relname = 'credit_transactions'
+          AND i.indisunique
+          AND i.indpred IS NULL
+          AND i.indnatts = 1
+          AND (
+            SELECT attname FROM pg_attribute
+             WHERE attrelid = c.oid AND attnum = i.indkey[0]
+          ) = 'reference'
+        LIMIT 1`
+    );
+    indexUtilisable = idx.rows.length > 0;
+
+    if (!indexUtilisable) {
+      console.warn(
+        '[CREDITS] Colonne reference presente mais aucun index unique total ne ' +
+          'la couvre : ON CONFLICT desactive, idempotence assuree par ' +
+          'pre-lecture transactionnelle.'
+      );
+    }
+  }
+
   schemaCache = {
     reference: colonnes.has('reference'),
+    referenceIndexUtilisable: indexUtilisable,
     balanceAfter: colonnes.has('balance_after'),
     metadata: colonnes.has('metadata'),
     amountEurCentimes: colonnes.has('amount_eur_centimes'),
@@ -115,7 +158,7 @@ async function detecterSchema(): Promise<SchemaCredits> {
   if (!schemaCache.reference) {
     console.warn(
       '[CREDITS] Colonne credit_transactions.reference absente : idempotence ' +
-        'desactivee. Appliquer migrations/004_credits_ledger.sql.'
+        'reduite a la pre-lecture. Appliquer migrations/004_credits_ledger.sql.'
     );
   }
   return schemaCache;
@@ -165,8 +208,9 @@ async function insererLigneJournal(
   }
 
   const placeholders = valeurs.map((_, i) => `$${i + 1}`).join(', ');
+  // `ON CONFLICT` n'est emis que si un index unique total le rend inferable.
   const conflit =
-    schema.reference && mouvement.reference
+    schema.referenceIndexUtilisable && mouvement.reference
       ? 'ON CONFLICT (reference) DO NOTHING'
       : '';
 

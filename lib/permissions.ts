@@ -45,14 +45,43 @@ export async function getUserRoleLevel(userId: string): Promise<string> {
 /**
  * Check if a user has a specific permission based on their role_level.
  */
+/**
+ * Colonne de role reellement presente dans role_permissions.
+ *
+ * Le code interrogeait `role_permissions.role_level`. La table de production ne
+ * porte que `role` : toute lecture levait un 42703. Le court-circuit
+ * proprietaire masquait le probleme, chaque inscrit etant proprietaire de son
+ * organisation ; mais des qu'une permission est verifiee pour un membre non
+ * proprietaire, la requete echouait en HTTP 500. Le probleme est devenu visible
+ * en ajoutant les gardes de permission sur les routes payantes.
+ */
+async function colonneRolePermissions(): Promise<string> {
+  const colonnes = await getColonnes('role_permissions');
+  if (colonnes.has('role_level')) return 'role_level';
+  if (colonnes.has('role')) return 'role';
+  return '';
+}
+
 export async function hasPermission(userId: string, orgId: string, permission: string): Promise<boolean> {
   const orgCheck = await query('SELECT owner_id FROM organizations WHERE id = $1', [orgId]);
   if (orgCheck.rows.length > 0 && orgCheck.rows[0].owner_id === userId) return true;
 
   const roleLevel = await getUserRoleLevel(userId);
+  const colonne = await colonneRolePermissions();
+
+  if (!colonne) {
+    // Referentiel de permissions inexploitable : on refuse plutot que
+    // d'autoriser par defaut. Un fail-open sur une action payante serait pire
+    // qu'un refus visible.
+    console.error(
+      '[PERMISSIONS] role_permissions ne porte ni role_level ni role : ' +
+        'toute permission non proprietaire est refusee.'
+    );
+    return false;
+  }
 
   const result = await query(
-    'SELECT 1 FROM role_permissions WHERE role_level = $1 AND permission = $2',
+    `SELECT 1 FROM role_permissions WHERE ${colonne} = $1 AND permission = $2`,
     [roleLevel, permission]
   );
   return result.rows.length > 0;
@@ -62,8 +91,11 @@ export async function hasPermission(userId: string, orgId: string, permission: s
  * Get all permissions for a role level.
  */
 export async function getPermissionsForRole(roleLevel: string): Promise<string[]> {
+  const colonne = await colonneRolePermissions();
+  if (!colonne) return [];
+
   const result = await query(
-    'SELECT permission FROM role_permissions WHERE role_level = $1',
+    `SELECT permission FROM role_permissions WHERE ${colonne} = $1`,
     [roleLevel]
   );
   return result.rows.map((r: any) => r.permission);

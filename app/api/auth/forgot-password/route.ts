@@ -8,19 +8,23 @@ export const dynamic = 'force-dynamic';
 
 export async function POST(req: NextRequest) {
   try {
-    // Rate limiting
+    // Le corps est lu AVANT le controle de debit pour fournir l'adresse email
+    // comme discriminant : sans elle, et quand l'IP n'est pas resoluble, le
+    // comptage retombait sur une cle aleatoire, donc sur aucune limitation.
+    const { email } = await req.json();
+
     const ip = getClientIP(req);
-    // Sans discriminant, un compteur global bloquerait tout le monde quand
-    // l'IP n'est pas resoluble : voir lib/rate-limit.
-    const rateCheck = checkRateLimit(ip, 'forgot-password');
+    const rateCheck = checkRateLimit(
+      ip,
+      'forgot-password',
+      typeof email === 'string' ? email : undefined
+    );
     if (!rateCheck.allowed) {
       return NextResponse.json(
         { error: 'Trop de tentatives. Réessayez plus tard.' },
         { status: 429, headers: { 'Retry-After': String(rateCheck.retryAfter) } }
       );
     }
-
-    const { email } = await req.json();
 
     if (!email) {
       return NextResponse.json({ error: 'Email requis' }, { status: 400 });

@@ -3,6 +3,10 @@ import { authenticateRequest } from '@/lib/api-auth';
 import { query } from '@/lib/db';
 import { logAudit, getIpFromRequest } from "@/lib/audit";
 import { randomUUID } from "node:crypto";
+import {
+  normaliserEnrichissement,
+  choisirParcellePrincipale,
+} from "@/lib/enrichment-mapper";
 
 export const dynamic = 'force-dynamic';
 
@@ -103,12 +107,20 @@ function mapBackendResult(result: any, index: number): any {
   const entreprise = result.entreprise || {};
   const proprietes = result.proprietes || [];
 
-  const mappedProprietes = proprietes.map((prop: any) => {
+  // Le backend groupe les proprietes par ADRESSE, chacune pouvant porter
+  // plusieurs references cadastrales. Ne retenir que references_cadastrales[0],
+  // comme le faisait la version precedente, jetait toutes les parcelles
+  // supplementaires que le backend renvoie deja enrichies : l'ecran n'affichait
+  // qu'une parcelle sur N, et le CSV melangeait la reference d'une parcelle avec
+  // la vente d'une autre.
+  //
+  // On emet donc une entree par (adresse x reference cadastrale).
+  const mappedProprietes = proprietes.flatMap((prop: any) => {
     const addr = prop.adresse || prop;
-    // Le backend retourne references_cadastrales (pluriel, tableau)
     const refs = prop.references_cadastrales || [];
-    const firstRef = refs[0] || prop.reference_cadastrale || {};
-    return {
+    const references = refs.length > 0 ? refs : [prop.reference_cadastrale || {}];
+
+    return references.map((firstRef: any) => ({
       adresse: addr.adresse_complete || `${addr.numero || ''} ${addr.type_voie || ''} ${addr.nom_voie || ''}`.trim(),
       code_postal: addr.code_postal || '',
       ville: addr.commune || '',
@@ -129,7 +141,7 @@ function mapBackendResult(result: any, index: number): any {
       enrichissement: firstRef.enrichissement ?? null,
       latitude: addr.latitude,
       longitude: addr.longitude,
-    };
+    }));
   });
 
   let dirigeant: string | undefined;
@@ -290,89 +302,25 @@ export async function POST(req: NextRequest) {
         const distant = pid ? enrichmentData[pid] : null;
         const donnees = inline || distant;
         if (donnees) {
-          prop.enrichissement = donnees;
-          enrichments.push(donnees);
+          const normalise = normaliserEnrichissement(donnees);
+          prop.enrichissement = normalise;
+          if (normalise) enrichments.push(normalise);
         }
       }
       if (enrichments.length > 0) {
-        // On retient la parcelle la plus significative, et non la premiere du
-        // tableau qui etait un choix arbitraire : celle dont la vente est la
-        // plus recente, a defaut la plus grande.
-        const e = enrichments.reduce((best: any, cur: any) => {
-          const bd = best?.derniere_vente?.date_mutation || '';
-          const cd = cur?.derniere_vente?.date_mutation || '';
-          if (cd !== bd) return cd > bd ? cur : best;
-          return (cur?.surface_parcelle_m2 || 0) > (best?.surface_parcelle_m2 || 0) ? cur : best;
-        });
+        // Normalisation avant toute lecture : le backend peut etre a l'ancien
+        // contrat (champs a plat) ou au contrat courant (derniere_vente, ventes).
+        // Lire directement les nouveaux noms produisait un enrichissement vide
+        // face a un backend anterieur, et vidait aussi les filtres.
+        const normalises = enrichments
+          .map((e: any) => normaliserEnrichissement(e))
+          .filter(Boolean) as ReturnType<typeof normaliserEnrichissement>[];
 
-        const dv = e.derniere_vente || null;
-
-        result.enrichissement = {
-          // --- Parcelle ---
-          surface_parcelle: e.surface_parcelle_m2 ?? null,
-          surface_geometrique: e.surface_geometrique_m2 ?? null,
-
-          // --- Derniere vente enregistree ---
-          // `valeur_fonciere` est le montant reellement enregistre par
-          // l'administration fiscale. Il etait calcule par le backend puis
-          // jete avant d'etre renvoye : c'est la donnee la plus demandee du
-          // produit et elle n'arrivait jamais jusqu'a l'ecran.
-          derniere_vente: dv
-            ? {
-                date: dv.date_mutation,
-                prix: dv.valeur_fonciere,
-                nature: dv.nature_mutation,
-                type_local: dv.type_local,
-                surface_bati: dv.surface_bati_m2,
-                surface_terrain: dv.surface_terrain_m2,
-                prix_m2_bati: dv.prix_m2_bati,
-                prix_m2_terrain: dv.prix_m2_terrain,
-                nombre_pieces: dv.nombre_pieces,
-                foncier_nu: dv.foncier_nu,
-                // Signale que le prix couvre plusieurs parcelles et n'est donc
-                // pas imputable a celle-ci seule.
-                prix_partage: dv.prix_couvre_plusieurs_parcelles,
-              }
-            : null,
-          // Champs a plat, pour les consommateurs existants.
-          date_derniere_transaction: dv?.date_mutation ?? null,
-          prix_derniere_vente: dv?.valeur_fonciere ?? null,
-          prix_m2: dv?.prix_m2_bati ?? dv?.prix_m2_terrain ?? null,
-          surface_batie: dv?.surface_bati_m2 ?? null,
-          type_transaction: dv?.type_local ?? null,
-
-          // --- Historique ---
-          historique_ventes: (e.ventes || []).map((v: any) => ({
-            date: v.date_mutation,
-            prix: v.valeur_fonciere,
-            nature: v.nature_mutation,
-            type_local: v.type_local,
-            prix_m2: v.prix_m2_bati ?? v.prix_m2_terrain ?? null,
-          })),
-          nb_transactions: e.nb_transactions ?? 0,
-          premiere_transaction: e.premiere_transaction ?? null,
-
-          // --- Bati ---
-          type_bien: e.type_bien ?? null,
-          annee_construction: e.annee_construction ?? null,
-          nb_niveaux: e.nb_niveaux ?? null,
-          nb_logements: e.nb_logements ?? null,
-          materiau_mur: e.materiau_mur ?? null,
-          materiau_toit: e.materiau_toit ?? null,
-
-          // --- Copropriete ---
-          est_copropriete: e.est_copropriete ?? false,
-          nom_copropriete: e.nom_copropriete ?? null,
-          nb_lots_total: e.nb_lots_total ?? null,
-          nb_lots_habitation: e.nb_lots_habitation ?? null,
-          nb_lots_tertiaire: e.nb_lots_tertiaire ?? null,
-          nb_lots_stationnement: e.nb_lots_stationnement ?? null,
-
-          // --- Qualification ---
-          foncier_nu: e.foncier_nu ?? false,
-          sources: e.sources ?? null,
-        };
-        result.enriched = true;
+        const principal = choisirParcellePrincipale(normalises as any);
+        if (principal) {
+          result.enrichissement = principal;
+          result.enriched = true;
+        }
       }
     }
 

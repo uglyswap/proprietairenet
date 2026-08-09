@@ -3,6 +3,7 @@ import { authenticateRequest } from '@/lib/api-auth';
 import { query } from '@/lib/db';
 import { logAudit, getIpFromRequest } from "@/lib/audit";
 import { erreurServeur } from '@/lib/api-error';
+import { normaliserEnrichissement, choisirParcellePrincipale } from "@/lib/enrichment-mapper";
 
 export const dynamic = 'force-dynamic';
 
@@ -201,37 +202,37 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    const enrichmentData = await fetchEnrichment(parcelles);
+    // Le backend joint desormais l'enrichissement aux resultats : on ne rappelle
+    // /search/enrich que si aucune parcelle n'en porte deja.
+    const dejaEnrichi = mappedResults.some((r: any) =>
+      (r.proprietes || []).some((p: any) => p.enrichissement)
+    );
+    const enrichmentData = dejaEnrichi ? {} : await fetchEnrichment(parcelles);
 
     for (const result of mappedResults) {
       const enrichments: any[] = [];
       for (const prop of result.proprietes || []) {
         const pid = buildParcelleId(prop);
-        if (pid && enrichmentData[pid]) {
-          enrichments.push(enrichmentData[pid]);
+        const donnees = prop.enrichissement || (pid ? enrichmentData[pid] : null);
+        if (donnees) {
+          const normalise = normaliserEnrichissement(donnees);
+          prop.enrichissement = normalise;
+          if (normalise) enrichments.push(normalise);
         }
       }
       if (enrichments.length > 0) {
-        const e = enrichments[0];
-        result.enrichissement = {
-          type_bien: e.type_bien,
-          surface_parcelle: e.surface_parcelle,
-          surface_batie: e.surface_batie,
-          prix_m2: e.prix_m2,
-          date_derniere_transaction: e.date_derniere_transaction,
-          nb_transactions: e.nb_transactions,
-          est_copropriete: e.est_copropriete,
-          nb_lots_total: e.nb_lots_total,
-          nb_lots_habitation: e.nb_lots_habitation,
-          nb_lots_tertiaire: e.nb_lots_tertiaire,
-          nom_copropriete: e.nom_copropriete,
-          annee_construction: e.annee_construction,
-          nb_niveaux: e.nb_niveaux,
-          nb_logements: e.nb_logements,
-          surface_lots_carrez: e.surface_lots_carrez,
-          type_transaction: e.type_transaction,
-        };
-        result.enriched = true;
+        // Meme normalisation que /api/cadastre/search : cette route lisait les
+        // anciens noms de champs et ressortait un enrichissement entierement
+        // vide face au contrat courant du backend.
+        const normalises = enrichments
+          .map((e: any) => normaliserEnrichissement(e))
+          .filter(Boolean) as ReturnType<typeof normaliserEnrichissement>[];
+
+        const principal = choisirParcellePrincipale(normalises as any);
+        if (principal) {
+          result.enrichissement = principal;
+          result.enriched = true;
+        }
       }
     }
 

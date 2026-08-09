@@ -237,6 +237,50 @@ export async function checkSearchLimit(userId: string, orgId: string, isAdmin: b
   const colonnesOrg = await getColonnes('organizations');
   const aColonneReset = colonnesOrg.has('monthly_searches_reset_at');
 
+  // SANS LA COLONNE DE PERIODE, ON NE BLOQUE PAS.
+  //
+  // Le garde de quota vient d'etre rendu reellement effectif : il renvoyait
+  // jusqu'ici un 403 que les appelants n'appliquaient jamais. Combine a
+  // l'absence de remise a zero, l'appliquer tel quel transformerait un quota
+  // deja atteint en blocage DEFINITIF, cette fois reel, pour les comptes
+  // concernes. C'est exactement le defaut que ce travail corrige.
+  //
+  // Tant que monthly_searches_reset_at n'existe pas, le quota ne peut pas etre
+  // periodique : on continue de compter les recherches, mais on n'interdit pas.
+  // Le blocage devient actif en meme temps que la remise a zero, c'est-a-dire
+  // a l'application de migrations/005_quota_mensuel.sql.
+  if (!aColonneReset) {
+    const compteur = await query(
+      `UPDATE organizations
+          SET monthly_searches_used = monthly_searches_used + 1
+        WHERE id = $1
+        RETURNING monthly_searches_used, monthly_searches_limit`,
+      [orgId]
+    );
+
+    const utilise = compteur.rows[0]?.monthly_searches_used ?? 0;
+    const limite = compteur.rows[0]?.monthly_searches_limit ?? monthly_searches_limit;
+
+    if (utilise > limite) {
+      console.warn(
+        `[QUOTA] Organisation ${orgId} au-dela de son quota (${utilise}/${limite}) ` +
+          'mais non bloquee : la colonne monthly_searches_reset_at est absente, ' +
+          'donc aucune remise a zero periodique n\'est possible. ' +
+          'Appliquer migrations/005_quota_mensuel.sql pour activer le quota.'
+      );
+    }
+
+    return {
+      allowed: true,
+      remaining: Math.max(0, limite - utilise),
+      limit: limite,
+      message:
+        utilise >= limite
+          ? 'Votre quota de recherches gratuites est atteint. Passez a l\'offre Pro pour des recherches illimitees.'
+          : undefined,
+    };
+  }
+
   const sqlIncrement = aColonneReset
     ? `UPDATE organizations
           SET monthly_searches_used = CASE

@@ -1,6 +1,16 @@
 import Stripe from "stripe";
+import { PoolClient } from "pg";
 import { query, getColonnes } from "./db";
-import { crediterCreditsAutonome } from "./credits";
+import { crediterCredits, crediterCreditsAutonome } from "./credits";
+
+/**
+ * Executeur de requete : soit le pool global, soit un client de transaction.
+ * Permet au webhook de traiter un evenement et de le marquer traite dans UNE
+ * SEULE transaction, condition necessaire pour qu'un echec n'ait jamais laisse
+ * de credits poses sans marquage, ni l'inverse.
+ */
+type Executeur = { query: (text: string, params?: any[]) => Promise<any> };
+const executeur = (client?: PoolClient): Executeur => client ?? { query };
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "", {
   apiVersion: "2023-10-16" as any,
@@ -117,21 +127,26 @@ export function normaliserPlanSlug(slug: string): string {
   return normalise;
 }
 
-export async function activateSubscription(orgId: string, subscriptionId: string, planSlug: string) {
+export async function activateSubscription(
+  orgId: string,
+  subscriptionId: string,
+  planSlug: string,
+  client?: PoolClient
+) {
   const plan = await getPlanBySlug(planSlug);
   if (!plan) throw new Error("Plan not found: " + planSlug);
 
   const slugCanonique = normaliserPlanSlug(planSlug);
 
-  await query(
+  await executeur(client).query(
     `UPDATE organizations SET subscription_plan = $1, stripe_subscription_id = $2,
      monthly_searches_limit = $3, max_users = $4, updated_at = now() WHERE id = $5`,
     [slugCanonique, subscriptionId, plan.monthly_searches_limit, plan.included_users, orgId]
   );
 }
 
-export async function cancelSubscription(orgId: string) {
-  await query(
+export async function cancelSubscription(orgId: string, client?: PoolClient) {
+  await executeur(client).query(
     `UPDATE organizations SET subscription_plan = 'free', stripe_subscription_id = NULL,
      monthly_searches_limit = 10, max_users = 1, updated_at = now() WHERE id = $1`,
     [orgId]
@@ -151,17 +166,28 @@ export async function addCredits(
   userId: string,
   credits: number,
   description: string,
-  options: { reference?: string; montantEurCentimes?: number } = {}
+  options: {
+    reference?: string;
+    montantEurCentimes?: number;
+    /** Client de transaction : indispensable depuis le webhook. */
+    client?: PoolClient;
+  } = {}
 ) {
-  await crediterCreditsAutonome({
+  const mouvement = {
     organizationId: orgId,
     userId,
     montant: credits,
-    type: 'purchase',
+    type: 'purchase' as const,
     description,
     reference: options.reference,
     montantEurCentimes: options.montantEurCentimes,
-  });
+  };
+
+  if (options.client) {
+    await crediterCredits(options.client, mouvement);
+    return;
+  }
+  await crediterCreditsAutonome(mouvement);
 }
 
 /**

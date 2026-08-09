@@ -10,6 +10,7 @@ import {
   messageExpediteurIncomplet,
 } from "@/lib/expediteur";
 import { erreurServeur } from '@/lib/api-error';
+import { insererMailHistory } from "@/lib/mail-history";
 
 export const dynamic = "force-dynamic";
 
@@ -170,25 +171,26 @@ export async function POST(req: NextRequest) {
 
         const recipientName = recipient.nom_societe || `${recipient.prenom || ''} ${recipient.nom || ''}`.trim();
 
-        // Save in mail_history
-        await query(
-          `INSERT INTO mail_history (
-            user_id, organization_id, service_postal_uid, destinataire,
-            type_affranchissement, couleur, status, prix, preview_url, expediteur, template_id
-          ) VALUES ($1, $2, $3, $4, $5, $6, 'preview', $7, $8, $9, $10)`,
-          [
-            auth.user.id,
-            auth.user.organization_id,
-            spResult.uid,
-            JSON.stringify(adresse_destination),
-            type_affranchissement,
-            couleur,
-            spResult.total || 0,
-            spResult.fichier_previsualisation?.url || null,
-            JSON.stringify(adresse_expedition),
-            template_id || null,
-          ]
-        );
+        // Enregistrement de la previsualisation.
+        //
+        // Cet INSERT nommait couleur, preview_url et expediteur, qui n'existent
+        // pas en production, et omettait `recipient` qui est NOT NULL. Il levait
+        // donc systematiquement, ce qui arretait le chemin monetise des sa
+        // premiere etape. L'ecriture passe desormais par lib/mail-history, qui
+        // ne nomme que les colonnes presentes et fournit toujours `recipient`.
+        await insererMailHistory({
+          userId: auth.user.id,
+          organizationId: auth.user.organization_id!,
+          service_postal_uid: spResult.uid,
+          destinataire: adresse_destination,
+          expediteur: adresse_expedition,
+          typeAffranchissement: tarifUnitaire.type_affranchissement,
+          couleur,
+          status: 'preview',
+          prix: spResult.total || 0,
+          previewUrl: spResult.fichier_previsualisation?.url || null,
+          templateId: template_id || null,
+        });
 
         successUids.push(spResult.uid);
         results.push({
