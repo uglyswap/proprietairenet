@@ -27,6 +27,7 @@ import { checkPermission } from "@/lib/permissions";
 import { query, getColonnes } from "@/lib/db";
 import { erreurServeur } from '@/lib/api-error';
 import { resoudreExpediteur, chargerOrganisationPourExpedition } from "@/lib/expediteur";
+import { requireFeature } from "@/lib/plan-features";
 
 export const dynamic = "force-dynamic";
 
@@ -49,6 +50,9 @@ export async function GET(req: NextRequest) {
   try {
     const { auth, error, status } = await authenticateRequest(req);
     if (!auth) return NextResponse.json({ error }, { status: status || 401 });
+    // Verrou de plan : cette fonctionnalite est vendue avec l'offre Pro.
+    const refusPlan = await requireFeature(auth, 'courrier');
+    if (refusPlan) return refusPlan;
 
     const org = await chargerOrganisationPourExpedition(auth.user.organization_id!);
     if (!org) {
@@ -93,6 +97,9 @@ export async function PUT(req: NextRequest) {
   try {
     const { auth, error, status } = await authenticateRequest(req);
     if (!auth) return NextResponse.json({ error }, { status: status || 401 });
+    // Verrou de plan : cette fonctionnalite est vendue avec l'offre Pro.
+    const refusPlan = await requireFeature(auth, 'courrier');
+    if (refusPlan) return refusPlan;
 
     // Seuls owner/admin de l'org ou un role disposant de settings.edit peuvent
     // modifier le profil expediteur.

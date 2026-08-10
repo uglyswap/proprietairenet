@@ -4,6 +4,7 @@ import { query } from '@/lib/db';
 import { getEffectiveRoleLevel } from '@/lib/permissions';
 import logger from '@/lib/logger';
 import { erreurServeur } from '@/lib/api-error';
+import { getPlanSlug, planAutorise } from "@/lib/plan-features";
 
 export const dynamic = 'force-dynamic';
 
@@ -66,7 +67,18 @@ export async function GET(req: NextRequest) {
         credits_spent: parseInt(totalCourriers.rows[0].credits_spent),
         credits_balance: parseInt(creditBalance.rows[0].credits_balance),
       };
-      data.recent_actions = recentActions.rows;
+      // Le journal d'audit et les indicateurs derives relevent de la meme
+      // fonctionnalite que /api/audit et /api/analytics, tous deux verrouilles.
+      // Les servir ici sans controle rendait le verrou contournable par un
+      // simple changement d'URL : une porte fermee, l'autre ouverte sur la
+      // meme piece.
+      const planOrg = await getPlanSlug(orgId);
+      if (planAutorise(planOrg, 'analytique')) {
+        data.recent_actions = recentActions.rows;
+      } else {
+        data.recent_actions = [];
+        data.analytique_verrouillee = true;
+      }
 
     } else if (roleLevel === 'manager') {
       // Manager: team analytics

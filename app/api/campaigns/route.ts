@@ -4,6 +4,7 @@ import { query } from '@/lib/db';
 import { checkPermission } from '@/lib/permissions';
 import { logAudit, getIpFromRequest } from '@/lib/audit';
 import { erreurServeur } from '@/lib/api-error';
+import { requireFeature } from "@/lib/plan-features";
 
 export const dynamic = 'force-dynamic';
 
@@ -11,6 +12,9 @@ export async function GET(req: NextRequest) {
   try {
     const { auth, error, status } = await authenticateRequest(req);
     if (!auth) return NextResponse.json({ error }, { status: status || 401 });
+    // Verrou de plan : cette fonctionnalite est vendue avec l'offre Pro.
+    const refusPlan = await requireFeature(auth, 'campagnes');
+    if (refusPlan) return refusPlan;
 
     const denied = await checkPermission(auth, 'courrier.bulk');
     if (denied) return denied;
@@ -30,6 +34,9 @@ export async function POST(req: NextRequest) {
   try {
     const { auth, error, status } = await authenticateRequest(req);
     if (!auth) return NextResponse.json({ error }, { status: status || 401 });
+    // Verrou de plan : cette fonctionnalite est vendue avec l'offre Pro.
+    const refusPlan = await requireFeature(auth, 'campagnes');
+    if (refusPlan) return refusPlan;
 
     const denied = await checkPermission(auth, 'courrier.bulk');
     if (denied) return denied;

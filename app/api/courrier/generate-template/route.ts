@@ -5,6 +5,7 @@ import { erreurServeur } from '@/lib/api-error';
 import { randomUUID } from "node:crypto";
 import { withTransaction } from "@/lib/db";
 import { debiterCredits, crediterCredits, CreditsInsuffisantsError } from "@/lib/credits";
+import { requireFeature } from "@/lib/plan-features";
 
 export const dynamic = "force-dynamic";
 
@@ -353,6 +354,9 @@ export async function POST(req: NextRequest) {
   try {
     const { auth, error, status } = await authenticateRequest(req);
     if (!auth) return NextResponse.json({ error }, { status: status || 401 });
+    // Verrou de plan : cette fonctionnalite est vendue avec l'offre Pro.
+    const refusPlan = await requireFeature(auth, 'ia');
+    if (refusPlan) return refusPlan;
 
     const body = await req.json();
     const { type, context } = body;

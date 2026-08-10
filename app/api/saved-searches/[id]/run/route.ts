@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { authenticateRequest } from '@/lib/api-auth';
 import { query } from '@/lib/db';
 import { erreurServeur } from '@/lib/api-error';
+import { requireFeature } from "@/lib/plan-features";
 
 export const dynamic = 'force-dynamic';
 
@@ -9,6 +10,9 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
   try {
     const { auth, error, status } = await authenticateRequest(req);
     if (!auth) return NextResponse.json({ error }, { status: status || 401 });
+    // Verrou de plan : cette fonctionnalite est vendue avec l'offre Pro.
+    const refusPlan = await requireFeature(auth, 'listes');
+    if (refusPlan) return refusPlan;
 
     const searchResult = await query(
       'SELECT * FROM saved_searches WHERE id = $1 AND user_id = $2',

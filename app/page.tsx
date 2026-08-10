@@ -117,7 +117,7 @@ export default function Home() {
                 </Button>
               </Link>
             </div>
-            <p className="text-sm text-gray-500">10 recherches gratuites &bull; Pas de carte bancaire &bull; Setup instantan&eacute;</p>
+            <p className="text-sm text-gray-500">10 r&eacute;sultats gratuits par mois &bull; Pas de carte bancaire &bull; Setup instantan&eacute;</p>
           </div>
           <div className="animate-in fade-in slide-in-from-bottom duration-700 delay-500">
             <div className="grid grid-cols-2 md:grid-cols-4 gap-8 mt-20 max-w-4xl mx-auto">

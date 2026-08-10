@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { authenticateRequest } from "@/lib/api-auth";
 import { query } from "@/lib/db";
 import { erreurServeur } from '@/lib/api-error';
+import { requireFeature } from "@/lib/plan-features";
 
 export const dynamic = "force-dynamic";
 
@@ -9,6 +10,9 @@ export async function GET(req: NextRequest) {
   try {
     const { auth, error, status } = await authenticateRequest(req);
     if (!auth) return NextResponse.json({ error }, { status: status || 401 });
+    // Verrou de plan : cette fonctionnalite est vendue avec l'offre Pro.
+    const refusPlan = await requireFeature(auth, 'courrier');
+    if (refusPlan) return refusPlan;
 
     // Get templates: org-specific + default templates, include category
     const result = await query(
@@ -30,6 +34,9 @@ export async function POST(req: NextRequest) {
   try {
     const { auth, error, status } = await authenticateRequest(req);
     if (!auth) return NextResponse.json({ error }, { status: status || 401 });
+    // Verrou de plan : cette fonctionnalite est vendue avec l'offre Pro.
+    const refusPlan = await requireFeature(auth, 'courrier');
+    if (refusPlan) return refusPlan;
 
     const body = await req.json();
     const { name, subject, content, variables, category } = body;
@@ -64,6 +71,9 @@ export async function DELETE(req: NextRequest) {
   try {
     const { auth, error, status } = await authenticateRequest(req);
     if (!auth) return NextResponse.json({ error }, { status: status || 401 });
+    // Verrou de plan : cette fonctionnalite est vendue avec l'offre Pro.
+    const refusPlan = await requireFeature(auth, 'courrier');
+    if (refusPlan) return refusPlan;
 
     const id = new URL(req.url).searchParams.get("id");
     if (!id) {

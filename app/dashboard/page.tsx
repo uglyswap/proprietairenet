@@ -88,6 +88,14 @@ export default function DashboardPage() {
   const [showUpgradePrompt, setShowUpgradePrompt] = useState(false);
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [searchesRemaining, setSearchesRemaining] = useState<number | null>(null);
+  // Quota en unite RESULTAT, alimente par le bloc `quota` des reponses de
+  // recherche. `enAttente` signifie qu'aucune recherche n'a encore ete faite
+  // dans la session : on n'affiche alors pas de solde plutot qu'un solde faux.
+  const [quotaInfo, setQuotaInfo] = useState<{
+    restant: number | null;
+    limiteMensuelle: number | null;
+    enAttente: boolean;
+  } | null>(null);
   const [dashData, setDashData] = useState<DashboardData | null>(null);
   const [savedSearches, setSavedSearches] = useState<SavedSearch[]>([]);
   const [showSaveDialog, setShowSaveDialog] = useState(false);
@@ -119,9 +127,17 @@ export default function DashboardPage() {
         }
       } catch {}
       
+      // Le quota est compte en RESULTATS depuis la migration 007. Les colonnes
+      // monthly_searches_limit / monthly_searches_used sont en unite REQUETE et
+      // ne sont plus alimentees par personne : les afficher montrait un solde
+      // faux, gele, et parfois negatif. Le solde reel arrive desormais avec
+      // chaque reponse de recherche, dans data.quota.
       if (data.organization.subscription_plan === 'free') {
-        const remaining = data.organization.monthly_searches_limit - data.organization.monthly_searches_used;
-        setSearchesRemaining(remaining);
+        setQuotaInfo({
+          restant: null,
+          limiteMensuelle: null,
+          enAttente: true,
+        });
       }
 
       // Load role-based dashboard data
@@ -272,20 +288,43 @@ export default function DashboardPage() {
         const count = data.total_proprietaires;
         toast.success(`${count} propriétaire${count > 1 ? 's' : ''} trouvé${count > 1 ? 's' : ''} !`);
         
-        if (data.searches_remaining !== undefined) {
-          setSearchesRemaining(data.searches_remaining);
-        }
+        // Bloc quota : solde restant, et surtout troncature. Sans cela,
+        // l'utilisateur voyait « 10 proprietaires trouves » pour une zone qui en
+        // contient 487, et croyait qu'il n'y en avait que 10.
+        const q = data.quota;
+        if (q) {
+          setQuotaInfo({
+            restant: typeof q.restant === 'number' ? q.restant : null,
+            limiteMensuelle:
+              typeof q.limite_mensuelle === 'number' ? q.limite_mensuelle : null,
+            enAttente: false,
+          });
 
-        if (data.upsell_message) {
-          setTimeout(() => {
-            toast(data.upsell_message, {
-              duration: 6000,
-              action: {
-                label: 'Passer au plan Pro',
-                onClick: () => router.push('/pricing'),
-              },
-            });
-          }, 2000);
+          if (q.tronque && typeof q.total_disponible === 'number' && q.total_disponible > count) {
+            const masques = q.total_disponible - count;
+            setTimeout(() => {
+              toast(
+                `${q.total_disponible} propriétaires correspondent à cette recherche, ` +
+                  `${masques} ne sont pas affichés.`,
+                {
+                  duration: 9000,
+                  action: q.upgrade_requis
+                    ? { label: 'Voir tout avec Pro', onClick: () => router.push('/pricing') }
+                    : undefined,
+                }
+              );
+            }, 1200);
+          } else if (q.message) {
+            setTimeout(() => {
+              toast(q.message, {
+                duration: 6000,
+                action: {
+                  label: 'Passer au plan Pro',
+                  onClick: () => router.push('/pricing'),
+                },
+              });
+            }, 2000);
+          }
         }
       } else {
         toast.info('Aucun résultat trouvé');
@@ -342,19 +381,48 @@ export default function DashboardPage() {
         setResults(data.resultats);
         toast.success(`${data.total_proprietaires} propriétaire${data.total_proprietaires > 1 ? 's' : ''} trouvé${data.total_proprietaires > 1 ? 's' : ''} dans la zone !`);
         
-        if (data.searches_remaining !== undefined) {
-          setSearchesRemaining(data.searches_remaining);
-        }
-        if (data.upsell_message) {
-          setTimeout(() => {
-            toast(data.upsell_message, {
-              duration: 6000,
-              action: {
-                label: 'Passer au plan Pro',
-                onClick: () => router.push('/pricing'),
-              },
-            });
-          }, 2000);
+        // Recherche par zone : c'est ici que la troncature compte le plus.
+        // Le backend connait le nombre REEL de proprietaires du polygone
+        // (total_dans_zone), independamment de ceux renvoyes. Ne pas le dire
+        // laissait croire qu'une zone de 487 proprietaires n'en contenait que 10.
+        const q = data.quota;
+        const renvoyes = Number(data.total_proprietaires ?? 0);
+        if (q) {
+          setQuotaInfo({
+            restant: typeof q.restant === 'number' ? q.restant : null,
+            limiteMensuelle:
+              typeof q.limite_mensuelle === 'number' ? q.limite_mensuelle : null,
+            enAttente: false,
+          });
+
+          const total = Number(
+            q.total_disponible ?? data.total_dans_zone ?? renvoyes
+          );
+
+          if (q.tronque && total > renvoyes) {
+            const masques = total - renvoyes;
+            setTimeout(() => {
+              toast(
+                `${total} propriétaires dans cette zone, ${masques} ne sont pas affichés.`,
+                {
+                  duration: 9000,
+                  action: q.upgrade_requis
+                    ? { label: 'Voir tout avec Pro', onClick: () => router.push('/pricing') }
+                    : undefined,
+                }
+              );
+            }, 1200);
+          } else if (q.message) {
+            setTimeout(() => {
+              toast(q.message, {
+                duration: 6000,
+                action: {
+                  label: 'Passer au plan Pro',
+                  onClick: () => router.push('/pricing'),
+                },
+              });
+            }, 2000);
+          }
         }
       } else {
         toast.info('Aucun résultat trouvé dans cette zone');
@@ -548,10 +616,15 @@ export default function DashboardPage() {
             </Badge>
 
             {/* Free plan indicator - hidden on very small screens */}
-            {isFree && searchesRemaining !== null && (
-              <Badge variant={searchesRemaining <= 3 ? 'destructive' : 'secondary'} className="hidden sm:flex px-2 md:px-3 py-1 md:py-1.5 text-xs">
+            {isFree && quotaInfo && !quotaInfo.enAttente && quotaInfo.restant !== null && (
+              <Badge
+                variant={quotaInfo.restant <= 3 ? 'destructive' : 'secondary'}
+                className="hidden sm:flex px-2 md:px-3 py-1 md:py-1.5 text-xs"
+                title="Résultats de recherche restants ce mois-ci"
+              >
                 <Search className="mr-1 h-3 w-3" />
-                {searchesRemaining}/{org?.monthly_searches_limit}
+                {quotaInfo.restant}
+                {quotaInfo.limiteMensuelle !== null ? `/${quotaInfo.limiteMensuelle}` : ''} résultats
               </Badge>
             )}
 

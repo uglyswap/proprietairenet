@@ -262,17 +262,42 @@ export async function POST(req: NextRequest) {
       if (data.success && data.resultats) allResults = data.resultats;
       searchType = 'owner';
     } else if (adresses && Array.isArray(adresses)) {
+      // Le plafond doit borner le CUMUL, pas chaque adresse prise isolement.
+      // Applique par adresse, il autorisait 200 adresses x 10 resultats, soit
+      // 200 fois le budget mensuel d'un compte gratuit en une seule requete, et
+      // franchissait d'un facteur 10 le plafond anti-aspiration de l'offre Pro.
+      //
+      // On deduplique par proprietaire au passage : le meme proprietaire
+      // apparaissant a plusieurs adresses du lot etait compte plusieurs fois.
+      const proprietairesVus = new Set<string>();
+
       for (const addr of adresses) {
+        if (allResults.length >= limiteResultats) break;
         if (!addr.adresse || addr.adresse.length < 3) continue;
         try {
-          const params = new URLSearchParams({ adresse: addr.adresse, limit: String(Math.min(10, limiteResultats)) });
+          const restantLot = limiteResultats - allResults.length;
+          const params = new URLSearchParams({
+            adresse: addr.adresse,
+            limit: String(Math.max(1, Math.min(10, restantLot))),
+          });
           if (addr.departement) params.set('departement', addr.departement);
           const resp = await fetchBackend(`${CADASTRE_API_URL}/search/address?${params}`, {
             headers: { 'X-API-Key': CADASTRE_API_KEY },
           });
           if (resp.ok) {
             const data = await resp.json();
-            if (data.success && data.resultats) allResults.push(...data.resultats);
+            if (data.success && data.resultats) {
+              for (const r of data.resultats) {
+                if (allResults.length >= limiteResultats) break;
+                const cle =
+                  r?.proprietaire?.siren ||
+                  r?.proprietaire?.denomination ||
+                  JSON.stringify(r?.proprietaire ?? {});
+                if (proprietairesVus.has(cle)) continue;
+                proprietairesVus.add(cle);
+                allResults.push(r);
+              }
+            }
           } else if (resp.status === 401 || resp.status === 403 || resp.status === 429) {
             // Erreur globale (cle API ou rate limit) : propager au lieu d'avaler
             throw new BackendError(backendErrorMessage(resp.status), resp.status);
@@ -389,6 +414,17 @@ export async function POST(req: NextRequest) {
       });
     }
 
+    // Garde-fou terminal, commun aux trois branches de recherche.
+    //
+    // Ni le backend cadastre ni la boucle de lot ne sont des sources de verite
+    // sur le nombre de resultats : on borne ici, une fois, avant de debiter et
+    // avant de repondre. Le nombre debite et le nombre renvoye sont ainsi
+    // toujours le meme, par construction.
+    const tronqueParQuota = filteredResults.length > limiteResultats;
+    const resultatsRenvoyes = tronqueParQuota
+      ? filteredResults.slice(0, limiteResultats)
+      : filteredResults;
+
     // Log search
     query(
       `INSERT INTO search_history (user_id, organization_id, search_type, query_data, results_count)
@@ -397,14 +433,14 @@ export async function POST(req: NextRequest) {
        // Compte APRES filtrage : enregistrer mappedResults.length surevaluait
        // le nombre de resultats reellement obtenus, et aurait fait payer a
        // l'utilisateur des resultats jamais affiches.
-       JSON.stringify({ adresse, denomination, siren, departement }), filteredResults.length]
+       JSON.stringify({ adresse, denomination, siren, departement }), resultatsRenvoyes.length]
     ).catch(console.error);
 
     // Debit du nombre de resultats REELLEMENT renvoyes. Une recherche sans
     // resultat ne coute donc rien, sans avoir besoin d'un trigger correctif.
     const consommation = await consommerResultats(
       organizationId,
-      filteredResults.length,
+      resultatsRenvoyes.length,
       quota.limites
     );
 
@@ -415,11 +451,14 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({
       success: true,
-      resultats: filteredResults,
-      total_proprietaires: filteredResults.length,
-      total_lots: filteredResults.reduce((sum: number, r: any) => sum + (r.nombre_lots || 0), 0),
+      resultats: resultatsRenvoyes,
+      total_proprietaires: resultatsRenvoyes.length,
+      total_lots: resultatsRenvoyes.reduce((sum: number, r: any) => sum + (r.nombre_lots || 0), 0),
       quota: {
-        ...blocQuota(quota, filteredResults.length, totalDisponible),
+        ...blocQuota(quota, resultatsRenvoyes.length, totalDisponible),
+        // La troncature par le quota est signalee explicitement : sans cela,
+        // seule une troncature par filtrage d'enrichissement etait visible.
+        tronque_par_quota: tronqueParQuota,
         restant: consommation.applique ? consommation.restant : quota.restant,
       },
     });

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { authenticateRequest } from "@/lib/api-auth";
 import { query } from "@/lib/db";
 import { erreurServeur } from '@/lib/api-error';
+import { requireFeature } from "@/lib/plan-features";
 
 export const dynamic = "force-dynamic";
 
@@ -12,6 +13,9 @@ export async function PUT(
   try {
     const { auth, error, status } = await authenticateRequest(req);
     if (!auth) return NextResponse.json({ error }, { status: status || 401 });
+    // Verrou de plan : cette fonctionnalite est vendue avec l'offre Pro.
+    const refusPlan = await requireFeature(auth, 'crm');
+    if (refusPlan) return refusPlan;
 
     const contactId = params.id;
     const body = await req.json();
@@ -66,6 +70,9 @@ export async function DELETE(
   try {
     const { auth, error, status } = await authenticateRequest(req);
     if (!auth) return NextResponse.json({ error }, { status: status || 401 });
+    // Verrou de plan : cette fonctionnalite est vendue avec l'offre Pro.
+    const refusPlan = await requireFeature(auth, 'crm');
+    if (refusPlan) return refusPlan;
 
     const contactId = params.id;
 

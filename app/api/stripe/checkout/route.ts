@@ -4,6 +4,7 @@ import stripe, { getOrCreateStripeCustomer, createCheckoutSession, getPlanBySlug
 import { query } from "@/lib/db";
 import { logAudit, getIpFromRequest } from "@/lib/audit";
 import { erreurServeur } from '@/lib/api-error';
+import { requireFeature } from "@/lib/plan-features";
 
 export const dynamic = "force-dynamic";
 
@@ -73,7 +74,17 @@ export async function POST(req: NextRequest) {
 
       return NextResponse.json({ url: session.url });
 
-    } else if (type === "credits") {
+    } else if (type === "credits" || type === "custom_credits") {
+      // Les credits ne servent QU'A envoyer du courrier, et les cinq routes qui
+      // les consomment sont reservees a l'offre Pro. Laisser un compte gratuit
+      // en acheter jusqu'a 500 000, soit 4 250 EUR, revenait a encaisser un
+      // paiement pour un solde qu'aucune route ne lui permettrait de depenser :
+      // chaque tentative d'usage aurait renvoye 402. Litige carte garanti.
+      const refusPlan = await requireFeature(auth, 'courrier');
+      if (refusPlan) return refusPlan;
+    }
+
+    if (type === "credits") {
       // Legacy: fixed credit pack by ID
       const packResult = await query("SELECT * FROM credit_packs WHERE id = $1 AND is_active = true", [credit_pack_id]);
       const pack = packResult.rows[0];

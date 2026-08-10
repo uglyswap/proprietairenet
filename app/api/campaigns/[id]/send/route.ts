@@ -6,6 +6,7 @@ import { logAudit, getIpFromRequest } from '@/lib/audit';
 import { textToPdfBase64, replaceVariables } from '@/lib/pdf-generator';
 import { spFetch, isConfigured, getCreditCost } from '@/lib/service-postal';
 import { checkAndSendQuotaAlerts } from '@/lib/quota-alerts';
+import { requireFeature } from "@/lib/plan-features";
 
 export const dynamic = 'force-dynamic';
 
@@ -13,6 +14,9 @@ export async function POST(req: NextRequest) {
   try {
     const { auth, error, status } = await authenticateRequest(req);
     if (!auth) return NextResponse.json({ error }, { status: status || 401 });
+    // Verrou de plan : cette fonctionnalite est vendue avec l'offre Pro.
+    const refusPlan = await requireFeature(auth, 'campagnes');
+    if (refusPlan) return refusPlan;
 
     const denied = await checkPermission(auth, 'courrier.bulk');
     if (denied) return denied;

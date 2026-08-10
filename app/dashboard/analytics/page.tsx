@@ -8,7 +8,7 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import {
   ArrowLeft, Search, Mail, Coins, Users, TrendingUp, TrendingDown,
-  MapPin, Loader2, BarChart3, Target, Minus
+  MapPin, Loader2, BarChart3, Target, Minus, Lock,
 } from 'lucide-react';
 import { getMe, getAuthHeaders, ClientUser, ClientOrganization } from '@/lib/auth-client';
 
@@ -51,6 +51,11 @@ export default function AnalyticsPage() {
   const router = useRouter();
   const [loading, setLoading] = useState(true);
   const [data, setData] = useState<AnalyticsData | null>(null);
+  // Refus de plan : sans cet etat, un 402 laissait `data` a null et `loading` a
+  // false, donc la garde `if (loading || !data)` affichait un spinner
+  // indefiniment. Un cul-de-sac silencieux pour tout compte gratuit.
+  const [verrouilleParPlan, setVerrouilleParPlan] = useState(false);
+  const [messagePlan, setMessagePlan] = useState<string | null>(null);
 
   useEffect(() => {
     loadData();
@@ -65,16 +70,49 @@ export default function AnalyticsPage() {
       if (res.ok) {
         const analytics = await res.json();
         setData(analytics);
+      } else if (res.status === 402) {
+        const corps = await res.json().catch(() => ({}));
+        setVerrouilleParPlan(true);
+        setMessagePlan(
+          typeof corps?.error === 'string' && corps.error.trim()
+            ? corps.error
+            : "Le tableau de bord analytique est réservé à l'offre Pro."
+        );
       }
     } catch (err) {
       console.error('Analytics error:', err);
     } finally { setLoading(false); }
   };
 
-  if (loading || !data) {
+  if (loading) {
     return (
       <div className="flex items-center justify-center h-screen">
         <Loader2 className="h-8 w-8 animate-spin text-blue-600" />
+      </div>
+    );
+  }
+
+  if (verrouilleParPlan) {
+    return (
+      <div className="flex flex-col items-center justify-center h-screen gap-4 px-6 text-center">
+        <Lock className="h-10 w-10 text-muted-foreground" />
+        <h1 className="text-xl font-semibold">Tableau de bord analytique</h1>
+        <p className="max-w-md text-sm text-muted-foreground">{messagePlan}</p>
+        <Button onClick={() => router.push('/pricing')}>Voir les offres</Button>
+      </div>
+    );
+  }
+
+  if (!data) {
+    return (
+      <div className="flex flex-col items-center justify-center h-screen gap-4 px-6 text-center">
+        <h1 className="text-xl font-semibold">Données indisponibles</h1>
+        <p className="max-w-md text-sm text-muted-foreground">
+          Les statistiques n&apos;ont pas pu être chargées. Réessayez dans un instant.
+        </p>
+        <Button variant="outline" onClick={() => { setLoading(true); loadData(); }}>
+          Réessayer
+        </Button>
       </div>
     );
   }

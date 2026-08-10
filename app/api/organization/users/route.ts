@@ -4,6 +4,7 @@ import { query } from "@/lib/db";
 import { createNotification } from "@/lib/notifications";
 import logger from "@/lib/logger";
 import { erreurServeur } from '@/lib/api-error';
+import { requireFeature } from "@/lib/plan-features";
 
 export const dynamic = "force-dynamic";
 
@@ -39,6 +40,9 @@ export async function POST(req: NextRequest) {
   try {
     const { auth, error, status } = await authenticateRequest(req);
     if (!auth) return NextResponse.json({ error }, { status: status || 401 });
+    // Verrou de plan : cette fonctionnalite est vendue avec l'offre Pro.
+    const refusPlan = await requireFeature(auth, 'multi_utilisateurs');
+    if (refusPlan) return refusPlan;
 
     const orgResult = await query(
       "SELECT o.owner_id, o.max_users, o.subscription_plan, o.stripe_customer_id, o.stripe_extra_user_sub_id, p.stripe_extra_user_price_id, p.included_users FROM organizations o LEFT JOIN plans p ON p.slug = o.subscription_plan WHERE o.id = $1",
@@ -156,6 +160,9 @@ export async function PATCH(req: NextRequest) {
   try {
     const { auth, error, status } = await authenticateRequest(req);
     if (!auth) return NextResponse.json({ error }, { status: status || 401 });
+    // Verrou de plan : cette fonctionnalite est vendue avec l'offre Pro.
+    const refusPlan = await requireFeature(auth, 'multi_utilisateurs');
+    if (refusPlan) return refusPlan;
 
     const orgResult = await query("SELECT owner_id FROM organizations WHERE id = $1", [auth.user.organization_id]);
     const org = orgResult.rows[0];
@@ -193,6 +200,9 @@ export async function DELETE(req: NextRequest) {
   try {
     const { auth, error, status } = await authenticateRequest(req);
     if (!auth) return NextResponse.json({ error }, { status: status || 401 });
+    // Verrou de plan : cette fonctionnalite est vendue avec l'offre Pro.
+    const refusPlan = await requireFeature(auth, 'multi_utilisateurs');
+    if (refusPlan) return refusPlan;
 
     const orgResult = await query(
       "SELECT o.owner_id, o.stripe_extra_user_sub_id, p.included_users FROM organizations o LEFT JOIN plans p ON p.slug = o.subscription_plan WHERE o.id = $1",

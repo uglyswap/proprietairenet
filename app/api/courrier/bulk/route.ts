@@ -11,6 +11,7 @@ import {
 } from "@/lib/expediteur";
 import { erreurServeur } from '@/lib/api-error';
 import { insererMailHistory } from "@/lib/mail-history";
+import { requireFeature } from "@/lib/plan-features";
 
 export const dynamic = "force-dynamic";
 
@@ -18,6 +19,9 @@ export async function POST(req: NextRequest) {
   try {
     const { auth, error, status } = await authenticateRequest(req);
     if (!auth) return NextResponse.json({ error }, { status: status || 401 });
+    // Verrou de plan : cette fonctionnalite est vendue avec l'offre Pro.
+    const refusPlan = await requireFeature(auth, 'courrier');
+    if (refusPlan) return refusPlan;
     if (!isConfigured()) return NextResponse.json({ error: "Service courrier non configuré" }, { status: 503 });
 
     const body = await req.json();

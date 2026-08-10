@@ -41,7 +41,7 @@ export default function RegisterPage() {
 
   // Fetch plan info if a plan is selected
   useEffect(() => {
-    if (selectedPlan && selectedPlan !== 'gratuit') {
+    if (selectedPlan && selectedPlan !== 'gratuit' && selectedPlan !== 'free') {
       fetch('/api/plans')
         .then(r => r.json())
         .then(data => {
@@ -78,7 +78,7 @@ export default function RegisterPage() {
       toast.success('Compte créé ! Vous recevez 10 crédits gratuits 🎉');
       
       // If a paid plan is selected, redirect to Stripe checkout
-      if (selectedPlan && selectedPlan !== 'gratuit') {
+      if (selectedPlan && selectedPlan !== 'gratuit' && selectedPlan !== 'free') {
         const headers = getAuthHeaders();
         const response = await fetch('/api/stripe/checkout', {
           method: 'POST',
@@ -115,14 +115,14 @@ export default function RegisterPage() {
           </Link>
           <CardTitle className="text-2xl text-center">Créer un compte</CardTitle>
           <CardDescription className="text-center">
-            {selectedPlan && selectedPlan !== 'gratuit' && planInfo ? (
+            {selectedPlan && selectedPlan !== 'gratuit' && selectedPlan !== 'free' && planInfo ? (
               <Badge variant="default" className="mt-2 bg-blue-600">
                 Plan {planInfo.name} — {planInfo.price}€{selectedPeriod === 'annual' ? '/mois (annuel)' : '/mois'}
               </Badge>
             ) : (
               <Badge variant="secondary" className="mt-2">
                 <Gift className="h-3 w-3 mr-1" />
-                10 crédits offerts + 10 recherches/mois gratuites
+                10 crédits offerts + 10 résultats de recherche par mois
               </Badge>
             )}
           </CardDescription>

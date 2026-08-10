@@ -15,6 +15,15 @@ export async function DELETE(
   try {
     const { auth, error, status } = await authenticateRequest(req);
     if (!auth) return NextResponse.json({ error }, { status: status || 401 });
+    // PAS de verrou de plan ici, volontairement.
+    //
+    // L'annulation est un chemin de REMBOURSEMENT : elle rend des credits deja
+    // debites pour un pli qui n'est pas encore parti. La verrouiller derriere
+    // l'offre Pro enfermerait dehors un compte redescendu en gratuit, avec ses
+    // credits perdus a l'interieur. On ne bloque jamais ce qui protege l'argent
+    // de l'utilisateur.
+    //
+    // L'isolation reste assuree par la clause organization_id de la requete.
 
     const { uid } = params;
 

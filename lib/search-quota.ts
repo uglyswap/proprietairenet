@@ -185,7 +185,11 @@ export async function resoudreQuota(
   const org = await query(
     `SELECT subscription_plan,
             ${aCompteurResultats ? 'monthly_results_used' : '0 AS monthly_results_used'},
-            ${aColonneReset ? 'monthly_searches_reset_at' : 'NULL AS monthly_searches_reset_at'}
+            ${aColonneReset
+              ? `monthly_searches_reset_at,
+                 (monthly_searches_reset_at IS NOT NULL
+                  AND monthly_searches_reset_at >= date_trunc('month', now())) AS periode_en_cours`
+              : `NULL AS monthly_searches_reset_at, false AS periode_en_cours`}
        FROM organizations
       WHERE id = $1`,
     [organizationId]
@@ -221,9 +225,12 @@ export async function resoudreQuota(
   // Nouvelle période : le consommé repart de zéro. Tant que la colonne de
   // période n'existe pas, on ne peut pas savoir si la période a tourné, donc on
   // ne bloque pas (un quota sans remise à zéro est un blocage définitif).
-  const debutPeriode = org.rows[0].monthly_searches_reset_at;
-  const periodeEnCours =
-    debutPeriode !== null && new Date(debutPeriode) >= debutDuMois();
+  // La comparaison de periode se fait cote PostgreSQL, avec la MEME horloge et
+  // le meme fuseau que l'ecriture (date_trunc('month', now())). La calculer en
+  // JavaScript avec Date.UTC comparait deux horloges differentes : selon le
+  // fuseau du serveur applicatif, le dernier ou le premier jour du mois pouvait
+  // basculer du mauvais cote, et offrir ou retirer un budget entier.
+  const periodeEnCours = org.rows[0].periode_en_cours === true;
   const consomme = periodeEnCours ? Number(org.rows[0].monthly_results_used || 0) : 0;
 
   if (limites.resultatsParMois === null) {
@@ -290,11 +297,6 @@ function plafonner(plafondPlan: number, demande?: number): number {
     return Math.min(plafondPlan, Math.floor(demande));
   }
   return plafondPlan;
-}
-
-function debutDuMois(): Date {
-  const maintenant = new Date();
-  return new Date(Date.UTC(maintenant.getUTCFullYear(), maintenant.getUTCMonth(), 1));
 }
 
 // ---------------------------------------------------------------------------

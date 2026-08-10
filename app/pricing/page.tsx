@@ -110,7 +110,7 @@ export default function PricingPage() {
   };
 
   const handleSubscribe = async (slug: string) => {
-    if (slug === 'gratuit') {
+    if (normaliserSlug(slug) === 'free') {
       router.push(isLoggedIn ? '/dashboard' : '/register?plan=gratuit');
       return;
     }
@@ -219,6 +219,8 @@ export default function PricingPage() {
                       ? 'Illimité'
                       : `${plan.monthly_searches_limit} recherches/mois`;
               const capParRecherche = plan.max_results_per_search ?? null;
+              const mentionCap =
+                capParRecherche !== null ? `${capParRecherche} résultats max par recherche` : null;
 
               return (
                 <Card key={plan.id} className={`relative ${isPopular ? 'border-2 border-blue-500 shadow-2xl scale-105' : 'border shadow-lg'}`}>
@@ -254,9 +256,9 @@ export default function PricingPage() {
                     <Button
                       className={`w-full h-12 font-semibold ${isPopular ? 'bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700' : ''}`}
                       variant={isPopular ? 'default' : 'outline'}
-                      onClick={() => handleSubscribe(plan.slug)}
+                      onClick={() => handleSubscribe(normaliserSlug(plan.slug))}
                     >
-                      {plan.slug === 'gratuit' ? 'Commencer gratuitement' : `Choisir ${plan.name}`}
+                      {normaliserSlug(plan.slug) === 'free' ? 'Commencer gratuitement' : `Choisir ${plan.name}`}
                       <ArrowRight className="ml-2 h-4 w-4" />
                     </Button>
                   </CardContent>
