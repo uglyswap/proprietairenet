@@ -12,6 +12,17 @@ export interface ApiAuthResult {
   };
 }
 
+/**
+ * OBSOLETE depuis la migration 007 : l'option `checkSearch`.
+ *
+ * Le quota se compte desormais en RESULTATS et non en requetes, et ne peut donc
+ * plus etre resolu ici : il faut connaitre ce que la recherche a renvoye pour
+ * debiter. Les deux routes de recherche utilisent lib/search-quota, qui resout
+ * le quota avant la recherche et debite apres.
+ *
+ * `checkSearch` est conserve pour ne casser aucun appelant, mais plus aucune
+ * route ne le passe. Ne pas l'utiliser dans du code nouveau.
+ */
 // Authenticate request and optionally check search limit.
 //
 // CONTRAT (important): la limite de recherches gratuites n'est appliquee QUE si

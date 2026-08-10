@@ -4,6 +4,7 @@ import { query } from '@/lib/db';
 import { logAudit, getIpFromRequest } from "@/lib/audit";
 import { erreurServeur } from '@/lib/api-error';
 import { normaliserEnrichissement, choisirParcellePrincipale } from "@/lib/enrichment-mapper";
+import { resoudreQuota, consommerResultats, blocQuota } from "@/lib/search-quota";
 
 export const dynamic = 'force-dynamic';
 
@@ -148,10 +149,12 @@ function mapBackendResult(result: any, index: number): any {
 
 export async function POST(req: NextRequest) {
   try {
-    const { auth, error, status, upgrade_required } = await authenticateRequest(req, { checkSearch: true });
+    // Quota compte en RESULTATS : voir lib/search-quota. Il est resolu apres
+    // lecture du corps, car il depend de la limite demandee.
+    const { auth, error, status } = await authenticateRequest(req);
 
     if (!auth) {
-      return NextResponse.json({ error, upgrade_required }, { status: status || 401 });
+      return NextResponse.json({ error }, { status: status || 401 });
     }
 
     // Audit de la recherche par zone reussie (auth non-null ici)
@@ -160,11 +163,34 @@ export async function POST(req: NextRequest) {
     } catch {}
 
     const body = await req.json();
-    const { coordinates, limit = 200 } = body;
+    const { coordinates, limit } = body;
 
     if (!coordinates || !Array.isArray(coordinates) || coordinates.length < 3) {
       return NextResponse.json({ error: 'Minimum 3 points requis' }, { status: 400 });
     }
+
+    const organizationId = auth.user.organization_id;
+    if (!organizationId) {
+      return NextResponse.json({ error: 'Aucune organisation associée' }, { status: 403 });
+    }
+
+    const quota = await resoudreQuota(organizationId, {
+      estAdmin: auth.user.is_admin === true,
+      limiteDemandee: typeof limit === 'number' ? limit : undefined,
+    });
+
+    if (!quota.autorise) {
+      return NextResponse.json(
+        {
+          error: quota.message || 'Quota de résultats atteint',
+          upgrade_required: true,
+          quota: blocQuota(quota, 0, 0),
+        },
+        { status: 403 }
+      );
+    }
+
+    const limiteResultats = quota.limiteEffective;
 
     const polygon = coordinates.map((coord: number[]) => [coord[0], coord[1]]);
 
@@ -174,7 +200,7 @@ export async function POST(req: NextRequest) {
         'Content-Type': 'application/json',
         'X-API-Key': CADASTRE_API_KEY,
       },
-      body: JSON.stringify({ polygon, limit, stream: false }),
+      body: JSON.stringify({ polygon, limit: limiteResultats, stream: false }),
     });
 
     if (!backendResponse.ok) {
@@ -240,17 +266,37 @@ export async function POST(req: NextRequest) {
     query(
       `INSERT INTO search_history (user_id, organization_id, search_type, query_data, results_count)
        VALUES ($1, $2, 'map', $3, $4)`,
-      [auth.user.id, auth.user.organization_id, JSON.stringify({ coordinates, limit }), mappedResults.length]
+      [auth.user.id, auth.user.organization_id, JSON.stringify({ coordinates, limit: limiteResultats }), mappedResults.length]
     ).catch(console.error);
+
+    const consommation = await consommerResultats(
+      organizationId,
+      mappedResults.length,
+      quota.limites
+    );
+
+    // `total_dans_polygone` est le nombre REEL de proprietaires de la zone,
+    // calcule par le backend independamment des lignes renvoyees. C'est le
+    // meilleur argument de passage a Pro : « 487 proprietaires dans cette zone,
+    // vous en voyez 10 ». Le taire laisserait croire qu'il n'y en a que 10.
+    const totalDisponible = Number(
+      backendData.stats?.total_dans_polygone ??
+      backendData.total_dans_polygone ??
+      backendData.total_proprietaires ??
+      mappedResults.length
+    );
 
     return NextResponse.json({
       success: true,
       resultats: mappedResults,
-      total_proprietaires: backendData.total_proprietaires || mappedResults.length,
+      total_proprietaires: mappedResults.length,
+      total_dans_zone: totalDisponible,
       total_lots: backendData.total_lots || 0,
       stats: backendData.stats || {},
-      searches_remaining: auth.searchCheck?.remaining,
-      upsell_message: auth.searchCheck?.message,
+      quota: {
+        ...blocQuota(quota, mappedResults.length, totalDisponible),
+        restant: consommation.applique ? consommation.restant : quota.restant,
+      },
     });
 
   } catch (error: any) {

@@ -19,6 +19,10 @@ interface Plan {
   description: string;
   price_euros: number;
   monthly_searches_limit: number;
+  /** Budget mensuel de resultats. null = illimite (migration 007). */
+  monthly_results_limit?: number | null;
+  /** Plafond de resultats par recherche (migration 007). */
+  max_results_per_search?: number | null;
   included_users: number;
   extra_user_price: number;
   features: string[];
@@ -53,8 +57,15 @@ function getDiscountLabel(credits: number): string {
 }
 
 // Feature mapping per plan slug
+/** Normalise un slug de plan : la base peut porter `gratuit` ou `free`. */
+function normaliserSlug(slug: string): string {
+  const alias: Record<string, string> = { gratuit: 'free', freemium: 'free', professionnel: 'pro' };
+  const s = String(slug || '').trim().toLowerCase();
+  return alias[s] ?? s;
+}
+
 const FEATURE_MAP: Record<string, { text: string; included: boolean }[]> = {
-  gratuit: [
+  free: [
     { text: '10 résultats de recherche par mois', included: true }, { text: 'Comptabilisés uniquement si résultats', included: true },
     { text: 'Recherche par adresse', included: true }, { text: 'Recherche par zone sur carte', included: true },
     { text: 'Export CSV basique', included: true }, { text: 'CRM intégré', included: false },
@@ -187,9 +198,27 @@ export default function PricingPage() {
           <div className="grid md:grid-cols-2 gap-8 max-w-4xl mx-auto">
             {plans.map((plan) => {
               const displayPrice = billingPeriod === 'annual' ? Math.round(plan.price_euros * 0.8) : plan.price_euros;
-              const isPopular = plan.slug === 'pro';
-              const features = FEATURE_MAP[plan.slug] || plan.features.map(f => ({ text: f, included: true }));
-              const searchLimit = plan.monthly_searches_limit >= 999999 ? 'Illimité' : `${plan.monthly_searches_limit} recherches/mois`;
+              // Le slug est normalise avant toute comparaison : `plans.slug` vaut
+              // `gratuit` jusqu'a l'application de la migration 005, qui le
+              // renomme en `free`. Indexer FEATURE_MAP sur le slug brut, comme
+              // avant, faisait donc disparaitre les puces de fonctionnalites le
+              // jour ou la migration passait.
+              const slug = normaliserSlug(plan.slug);
+              const isPopular = slug === 'pro';
+              const features = FEATURE_MAP[slug] || plan.features.map(f => ({ text: f, included: true }));
+
+              // L'illimite est desormais encode par NULL, explicitement, et non
+              // par la sentinelle 999999 qui est aussi un entier plausible.
+              const budget = plan.monthly_results_limit;
+              const searchLimit =
+                budget === null
+                  ? 'Résultats illimités'
+                  : budget !== undefined
+                    ? `${budget} résultats/mois`
+                    : plan.monthly_searches_limit >= 999999
+                      ? 'Illimité'
+                      : `${plan.monthly_searches_limit} recherches/mois`;
+              const capParRecherche = plan.max_results_per_search ?? null;
 
               return (
                 <Card key={plan.id} className={`relative ${isPopular ? 'border-2 border-blue-500 shadow-2xl scale-105' : 'border shadow-lg'}`}>

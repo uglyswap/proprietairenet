@@ -3,6 +3,7 @@ import { authenticateRequest } from '@/lib/api-auth';
 import { query } from '@/lib/db';
 import { logAudit, getIpFromRequest } from "@/lib/audit";
 import { randomUUID } from "node:crypto";
+import { resoudreQuota, consommerResultats, blocQuota } from "@/lib/search-quota";
 import {
   normaliserEnrichissement,
   choisirParcellePrincipale,
@@ -183,20 +184,49 @@ function mapBackendResult(result: any, index: number): any {
 
 export async function POST(req: NextRequest) {
   try {
-    const { auth, error, status, upgrade_required } = await authenticateRequest(req, { checkSearch: true });
+    // Le quota se compte en RESULTATS, plus en requetes : il ne peut donc plus
+    // etre resolu dans authenticateRequest, qui s'execute avant de savoir
+    // combien de resultats la recherche renverra. On authentifie, on lit le
+    // corps pour connaitre la limite demandee, puis on resout le quota.
+    const { auth, error, status } = await authenticateRequest(req);
 
     if (!auth) {
-      return NextResponse.json({ error, upgrade_required }, { status: status || 401 });
+      return NextResponse.json({ error }, { status: status || 401 });
     }
 
-    // Audit de la recherche reussie (auth non-null ici)
+    const body = await req.json();
+    const { adresse, adresses, code_postal, departement, denomination, siren, limit,
+            type_bien, surface_min, surface_max, prix_m2_min, prix_m2_max, copropriete } = body;
+
+    const organizationId = auth.user.organization_id;
+    if (!organizationId) {
+      return NextResponse.json({ error: 'Aucune organisation associée' }, { status: 403 });
+    }
+
+    const quota = await resoudreQuota(organizationId, {
+      estAdmin: auth.user.is_admin === true,
+      limiteDemandee: typeof limit === 'number' ? limit : undefined,
+    });
+
+    if (!quota.autorise) {
+      return NextResponse.json(
+        {
+          error: quota.message || 'Quota de résultats atteint',
+          upgrade_required: true,
+          quota: blocQuota(quota, 0, 0),
+        },
+        { status: 403 }
+      );
+    }
+
+    // Toutes les requetes vers le backend sont bornees par cette valeur : c'est
+    // le seul endroit ou le plafond du plan et le budget restant se combinent.
+    const limiteResultats = quota.limiteEffective;
+
+    // Audit de la recherche autorisee
     try {
       logAudit(auth, "search.address", "search", undefined, {}, getIpFromRequest(req));
     } catch {}
-
-    const body = await req.json();
-    const { adresse, adresses, code_postal, departement, denomination, siren, limit = 200,
-            type_bien, surface_min, surface_max, prix_m2_min, prix_m2_max, copropriete } = body;
 
     let allResults: any[] = [];
     let searchType = 'text';
@@ -222,7 +252,7 @@ export async function POST(req: NextRequest) {
       searchType = 'siren';
     } else if (denomination) {
       const backendResponse = await fetchBackend(
-        `${CADASTRE_API_URL}/search/owner?denomination=${encodeURIComponent(denomination)}${departement ? `&departement=${departement}` : ''}&limit=${limit}`,
+        `${CADASTRE_API_URL}/search/owner?denomination=${encodeURIComponent(denomination)}${departement ? `&departement=${departement}` : ''}&limit=${limiteResultats}`,
         { headers: { 'X-API-Key': CADASTRE_API_KEY } }
       );
       if (!backendResponse.ok) {
@@ -235,7 +265,7 @@ export async function POST(req: NextRequest) {
       for (const addr of adresses) {
         if (!addr.adresse || addr.adresse.length < 3) continue;
         try {
-          const params = new URLSearchParams({ adresse: addr.adresse, limit: '10' });
+          const params = new URLSearchParams({ adresse: addr.adresse, limit: String(Math.min(10, limiteResultats)) });
           if (addr.departement) params.set('departement', addr.departement);
           const resp = await fetchBackend(`${CADASTRE_API_URL}/search/address?${params}`, {
             headers: { 'X-API-Key': CADASTRE_API_KEY },
@@ -258,7 +288,7 @@ export async function POST(req: NextRequest) {
       if (adresse.length < 3) {
         return NextResponse.json({ error: 'Minimum 3 caractères' }, { status: 400 });
       }
-      const params = new URLSearchParams({ adresse, limit: String(limit) });
+      const params = new URLSearchParams({ adresse, limit: String(limiteResultats) });
       if (departement) params.set('departement', departement);
       if (code_postal) params.set('code_postal', code_postal);
 
@@ -364,16 +394,34 @@ export async function POST(req: NextRequest) {
       `INSERT INTO search_history (user_id, organization_id, search_type, query_data, results_count)
        VALUES ($1, $2, $3, $4, $5)`,
       [auth.user.id, auth.user.organization_id, searchType,
-       JSON.stringify({ adresse, denomination, siren, departement }), mappedResults.length]
+       // Compte APRES filtrage : enregistrer mappedResults.length surevaluait
+       // le nombre de resultats reellement obtenus, et aurait fait payer a
+       // l'utilisateur des resultats jamais affiches.
+       JSON.stringify({ adresse, denomination, siren, departement }), filteredResults.length]
     ).catch(console.error);
+
+    // Debit du nombre de resultats REELLEMENT renvoyes. Une recherche sans
+    // resultat ne coute donc rien, sans avoir besoin d'un trigger correctif.
+    const consommation = await consommerResultats(
+      organizationId,
+      filteredResults.length,
+      quota.limites
+    );
+
+    // `mappedResults.length` est le nombre trouve avant filtrage : il sert a
+    // dire honnetement combien de proprietaires existent au-dela de ce qui est
+    // renvoye, au lieu de laisser croire qu'il n'y en a pas davantage.
+    const totalDisponible = Math.max(mappedResults.length, filteredResults.length);
 
     return NextResponse.json({
       success: true,
       resultats: filteredResults,
       total_proprietaires: filteredResults.length,
       total_lots: filteredResults.reduce((sum: number, r: any) => sum + (r.nombre_lots || 0), 0),
-      searches_remaining: auth.searchCheck?.remaining,
-      upsell_message: auth.searchCheck?.message,
+      quota: {
+        ...blocQuota(quota, filteredResults.length, totalDisponible),
+        restant: consommation.applique ? consommation.restant : quota.restant,
+      },
     });
 
   } catch (error: any) {

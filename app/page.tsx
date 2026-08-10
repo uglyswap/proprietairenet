@@ -266,18 +266,18 @@ export default function Home() {
           <div className="text-center mb-16">
             <Badge variant="secondary" className="mb-4 bg-blue-100 text-blue-700"><Zap className="h-3 w-3 mr-1" />Tarifs</Badge>
             <h2 className="text-3xl md:text-4xl font-bold mb-4 text-gray-900">Des tarifs simples et transparents</h2>
-            <p className="text-lg text-gray-600">Recherches illimit&eacute;es dans tous les plans. Cr&eacute;dits courrier vendus s&eacute;par&eacute;ment.</p>
+            <p className="text-lg text-gray-600">10 r&eacute;sultats par mois en gratuit, illimit&eacute;s en Pro. Cr&eacute;dits courrier vendus s&eacute;par&eacute;ment.</p>
           </div>
           <div className="grid md:grid-cols-2 gap-8 max-w-4xl mx-auto">
             {[
               {
                 name: 'Gratuit', price: '0', period: '/mois', desc: 'Pour tester', popular: false,
-                features: ['10 recherches par mois', 'Recherche par adresse', 'Recherche par zone', 'Export CSV basique'],
+                features: ['10 résultats de recherche par mois', 'Comptabilisés uniquement si résultats', 'Recherche par adresse', 'Recherche par zone', 'Export CSV basique'],
                 note: 'Crédits courrier vendus séparément'
               },
               {
                 name: 'Pro', price: '97', period: '/mois HT', desc: 'Pour les professionnels', popular: true,
-                features: ['Recherches illimitées', 'CRM intégré complet', 'Templates courrier + IA', 'Envoi courriers postaux', 'Multi-utilisateurs (+20€/user)', 'Dashboard analytique', 'Support prioritaire'],
+                features: ['Résultats illimités (200 max par recherche)', 'CRM intégré complet', 'Templates courrier + IA', 'Envoi courriers postaux', 'Multi-utilisateurs (+20€/user)', 'Dashboard analytique', 'Support prioritaire'],
                 note: 'Crédits courrier vendus séparément'
               },
             ].map((plan, i) => (
