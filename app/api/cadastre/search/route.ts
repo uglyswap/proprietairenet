@@ -8,11 +8,10 @@ import {
   normaliserEnrichissement,
   choisirParcellePrincipale,
 } from "@/lib/enrichment-mapper";
+import { CADASTRE_API_URL, CADASTRE_API_KEY } from "@/lib/cadastre-api";
 
 export const dynamic = 'force-dynamic';
 
-const CADASTRE_API_URL = process.env.CADASTRE_API_URL || 'http://cadastre-api:3001';
-const CADASTRE_API_KEY = process.env.CADASTRE_API_KEY || '';
 
 // Timeout backend cadastre (le backend peut tenir plusieurs minutes)
 const BACKEND_TIMEOUT_MS = 120000;
@@ -441,7 +440,9 @@ export async function POST(req: NextRequest) {
     const consommation = await consommerResultats(
       organizationId,
       resultatsRenvoyes.length,
-      quota.limites
+      quota.limites,
+      // Solde la reservation prise avant la recherche : le debit a deja eu lieu.
+      quota.reserve
     );
 
     // `mappedResults.length` est le nombre trouve avant filtrage : il sert a

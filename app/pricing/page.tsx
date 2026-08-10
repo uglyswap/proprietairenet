@@ -243,6 +243,12 @@ export default function PricingPage() {
                       </div>
                     )}
                     <p className="text-xs text-gray-500 mt-2">{plan.included_users} utilisateur inclus · {searchLimit}</p>
+                    {/* Le plafond par recherche differe selon le plan (10 en
+                        gratuit, 200 en Pro) et n'etait affiche nulle part,
+                        alors que le hero annonce 200 sans reserve de plan. */}
+                    {mentionCap && (
+                      <p className="text-xs text-gray-400">{mentionCap}</p>
+                    )}
                   </CardHeader>
                   <CardContent>
                     <ul className="space-y-3 mb-8">

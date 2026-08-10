@@ -4,6 +4,7 @@ import { query } from '@/lib/db';
 import logger from '@/lib/logger';
 import { erreurServeur } from '@/lib/api-error';
 import { requireFeature } from "@/lib/plan-features";
+import { getColonnes } from '@/lib/db';
 
 export const dynamic = 'force-dynamic';
 
@@ -44,11 +45,29 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Nom et paramètres requis' }, { status: 400 });
     }
 
+    // La base porte `query_data`, pas `query_params` : tout POST renvoyait 500.
+    // Le code est aligne sur la colonne existante plutot que d'ajouter une
+    // seconde colonne de meme semantique dont personne ne saurait laquelle fait
+    // foi. result_count et last_run_at sont, elles, reellement absentes : la
+    // migration 008 les ajoute, on ne les nomme que si elles existent.
+    const colonnesRecherche = await getColonnes('saved_searches');
+    const candidatsRecherche: Array<[string, unknown]> = [
+      ['organization_id', auth.user.organization_id],
+      ['user_id', auth.user.id],
+      ['name', name],
+      ['query_data', JSON.stringify(query_params ?? {})],
+      ['result_count', result_count || 0],
+      ['last_run_at', new Date()],
+    ];
+    const retenusRecherche = candidatsRecherche.filter(
+      ([c]) => c === 'name' || colonnesRecherche.has(c)
+    );
+
     const result = await query(
-      `INSERT INTO saved_searches (organization_id, user_id, name, query_params, result_count, last_run_at)
-       VALUES ($1, $2, $3, $4, $5, NOW())
+      `INSERT INTO saved_searches (${retenusRecherche.map(([c]) => c).join(', ')})
+       VALUES (${retenusRecherche.map((_, i) => `$${i + 1}`).join(', ')})
        RETURNING *`,
-      [auth.user.organization_id, auth.user.id, name, JSON.stringify(query_params), result_count || 0]
+      retenusRecherche.map(([, v]) => v)
     );
 
     logger.info('SAVED_SEARCH', 'Search saved', { searchId: result.rows[0].id });

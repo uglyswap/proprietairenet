@@ -3,6 +3,7 @@ import { authenticateRequest } from '@/lib/api-auth';
 import { query } from '@/lib/db';
 import { erreurServeur } from '@/lib/api-error';
 import { requireFeature } from "@/lib/plan-features";
+import { tableExiste, getColonnes } from '@/lib/db';
 
 export const dynamic = 'force-dynamic';
 
@@ -13,6 +14,20 @@ export async function POST(req: NextRequest) {
     // Verrou de plan : cette fonctionnalite est vendue avec l'offre Pro.
     const refusPlan = await requireFeature(auth, 'listes');
     if (refusPlan) return refusPlan;
+    // La table property_list_items n'existe pas encore en production : les
+    // requetes levaient un 42P01 remonte en HTTP 500 opaque, et l'utilisateur
+    // croyait a une panne alors que la fonctionnalite n'est pas deployee.
+    if (!(await tableExiste('property_list_items'))) {
+      return NextResponse.json(
+        {
+          error:
+            "La fonctionnalité listes n'est pas encore disponible sur cette " +
+            "installation. Appliquer migrations/008_listes_et_recherches_sauvegardees.sql.",
+          code: 'FONCTIONNALITE_NON_DEPLOYEE',
+        },
+        { status: 503 }
+      );
+    }
 
     const body = await req.json();
     const { list_id, company_name, director_name, property_address, property_postal_code, property_city, siren, data, notes } = body;
@@ -34,7 +49,11 @@ export async function POST(req: NextRequest) {
     );
 
     // Update list timestamp
-    await query('UPDATE property_lists SET updated_at = now() WHERE id = $1', [list_id]);
+    // property_lists n'a pas de colonne updated_at en production : la nommer en
+    // dur faisait echouer l'ajout d'un item APRES son insertion reussie.
+    if ((await getColonnes('property_lists')).has('updated_at')) {
+      await query('UPDATE property_lists SET updated_at = now() WHERE id = $1', [list_id]);
+    }
 
     return NextResponse.json({ item: result.rows[0] }, { status: 201 });
   } catch (err: any) {
@@ -49,6 +68,20 @@ export async function DELETE(req: NextRequest) {
     // Verrou de plan : cette fonctionnalite est vendue avec l'offre Pro.
     const refusPlan = await requireFeature(auth, 'listes');
     if (refusPlan) return refusPlan;
+    // La table property_list_items n'existe pas encore en production : les
+    // requetes levaient un 42P01 remonte en HTTP 500 opaque, et l'utilisateur
+    // croyait a une panne alors que la fonctionnalite n'est pas deployee.
+    if (!(await tableExiste('property_list_items'))) {
+      return NextResponse.json(
+        {
+          error:
+            "La fonctionnalité listes n'est pas encore disponible sur cette " +
+            "installation. Appliquer migrations/008_listes_et_recherches_sauvegardees.sql.",
+          code: 'FONCTIONNALITE_NON_DEPLOYEE',
+        },
+        { status: 503 }
+      );
+    }
 
     const { searchParams } = new URL(req.url);
     const itemId = searchParams.get('item_id');

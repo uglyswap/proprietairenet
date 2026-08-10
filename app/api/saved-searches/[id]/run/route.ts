@@ -3,6 +3,7 @@ import { authenticateRequest } from '@/lib/api-auth';
 import { query } from '@/lib/db';
 import { erreurServeur } from '@/lib/api-error';
 import { requireFeature } from "@/lib/plan-features";
+import { getColonnes } from '@/lib/db';
 
 export const dynamic = 'force-dynamic';
 
@@ -27,7 +28,11 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
 
     // Update last_run_at
     await query(
-      'UPDATE saved_searches SET last_run_at = NOW() WHERE id = $1',
+      // last_run_at est absente de la production : sans garde, l'execution d'une
+      // recherche sauvegardee echouait APRES avoir renvoye ses resultats.
+      (await getColonnes('saved_searches')).has('last_run_at')
+        ? 'UPDATE saved_searches SET last_run_at = NOW() WHERE id = $1'
+        : 'SELECT $1::uuid',
       [params.id]
     );
 

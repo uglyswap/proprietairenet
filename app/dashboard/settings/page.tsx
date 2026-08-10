@@ -54,6 +54,10 @@ export default function SettingsPage() {
   const [promoCode, setPromoCode] = useState('');
   const [branding, setBranding] = useState({ logo_courrier_url: '', courrier_header: '', courrier_footer: '' });
   const [savingBranding, setSavingBranding] = useState(false);
+  // Le profil expediteur et l'identite visuelle relevent de l'offre Pro. Sans
+  // cet etat, la page presentait a un compte gratuit un formulaire vide et
+  // modifiable, puis empilait deux messages d'erreur au chargement.
+  const [expediteurVerrouille, setExpediteurVerrouille] = useState(false);
   const [promoLoading, setPromoLoading] = useState(false);
 
   const headers: Record<string, string> = {
@@ -69,6 +73,10 @@ export default function SettingsPage() {
   const fetchSender = useCallback(async () => {
     try {
       const res = await fetch('/api/organization/sender', { headers });
+      if (res.status === 402) {
+        setExpediteurVerrouille(true);
+        return;
+      }
       if (res.ok) {
         const data = await res.json();
         if (data.sender) {

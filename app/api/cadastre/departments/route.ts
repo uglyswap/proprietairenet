@@ -1,9 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { CADASTRE_API_URL, CADASTRE_API_KEY } from "@/lib/cadastre-api";
 
 export const dynamic = 'force-dynamic';
 
-const CADASTRE_API_URL = process.env.CADASTRE_API_URL || 'http://84.247.175.132:8765';
-const CADASTRE_API_KEY = process.env.CADASTRE_API_KEY || '';
 
 export async function GET(req: NextRequest) {
   try {

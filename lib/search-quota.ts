@@ -79,6 +79,12 @@ export interface QuotaResolu {
   restant: number | null;
   /** True si `limiteEffective` est bridée par le budget et non par le plan. */
   bridePar: 'budget' | 'plan' | 'aucun';
+  /**
+   * Résultats réservés atomiquement avant la recherche. Le non-utilisé est
+   * libéré ensuite par `consommerResultats`. Zéro pour un plan illimité, qui
+   * n'a rien à réserver.
+   */
+  reserve: number;
   message?: string;
 }
 
@@ -202,6 +208,7 @@ export async function resoudreQuota(
       limites: REPLI_FAIL_CLOSED,
       consomme: 0,
       restant: 0,
+      reserve: 0,
       bridePar: 'budget',
       message: 'Organisation introuvable',
     };
@@ -218,6 +225,7 @@ export async function resoudreQuota(
       limites,
       consomme: 0,
       restant: null,
+      reserve: 0,
       bridePar: 'plan',
     };
   }
@@ -240,6 +248,7 @@ export async function resoudreQuota(
       limites,
       consomme,
       restant: null,
+      reserve: 0,
       bridePar: 'plan',
     };
   }
@@ -255,6 +264,7 @@ export async function resoudreQuota(
       limites,
       consomme,
       restant: Math.max(0, limites.resultatsParMois - consomme),
+      reserve: 0,
       bridePar: 'plan',
     };
   }
@@ -268,6 +278,7 @@ export async function resoudreQuota(
       limites,
       consomme,
       restant: 0,
+      reserve: 0,
       bridePar: 'budget',
       message:
         `Vous avez utilisé vos ${limites.resultatsParMois} résultats de recherche ` +
@@ -276,18 +287,77 @@ export async function resoudreQuota(
   }
 
   const parPlan = plafonner(limites.resultatsParRecherche, options.limiteDemandee);
-  const limiteEffective = Math.min(parPlan, restant);
+
+  // RESERVATION ATOMIQUE.
+  //
+  // Lire le consomme puis debiter apres la recherche laissait N recherches
+  // simultanees consommer chacune le budget entier : entre la lecture et le
+  // debit, chacune croyait disposer de la totalite.
+  //
+  // Tenir un verrou pendant la recherche n'est pas une option : un appel au
+  // backend cadastre peut durer 120 secondes, et verrouiller la ligne de
+  // l'organisation aussi longtemps bloquerait tout son trafic.
+  //
+  // On reserve donc AVANT, en une seule instruction serialisee par un
+  // SELECT ... FOR UPDATE, puis on libere le non-utilise APRES. Deux recherches
+  // concurrentes se partagent le budget au lieu de le dupliquer.
+  const reservation = await query(
+    `WITH avant AS (
+       SELECT id,
+              CASE WHEN monthly_searches_reset_at IS NULL
+                     OR monthly_searches_reset_at < date_trunc('month', now())
+                   THEN 0
+                   ELSE COALESCE(monthly_results_used, 0) END AS consomme
+         FROM organizations
+        WHERE id = $1
+          FOR UPDATE
+     ),
+     calc AS (
+       SELECT id, consomme,
+              LEAST($2::int, GREATEST($3::int - consomme, 0)) AS accorde
+         FROM avant
+     )
+     UPDATE organizations o
+        SET monthly_results_used      = c.consomme + c.accorde,
+            monthly_searches_reset_at = date_trunc('month', now()),
+            updated_at                = now()
+       FROM calc c
+      WHERE o.id = c.id
+     RETURNING c.accorde AS accorde, o.monthly_results_used AS consomme_apres`,
+    [organizationId, parPlan, limites.resultatsParMois]
+  );
+
+  const accorde = Number(reservation.rows[0]?.accorde ?? 0);
+  const consommeApres = Number(reservation.rows[0]?.consomme_apres ?? consomme);
+
+  if (accorde === 0) {
+    return {
+      limiteEffective: 0,
+      autorise: false,
+      limites,
+      consomme: consommeApres,
+      restant: 0,
+      reserve: 0,
+      bridePar: 'budget',
+      message:
+        `Vous avez utilisé vos ${limites.resultatsParMois} résultats de recherche ` +
+        "de ce mois. Passez à l'offre Pro pour des résultats illimités.",
+    };
+  }
+
+  const restantApres = Math.max(0, limites.resultatsParMois - consommeApres);
 
   return {
-    limiteEffective,
+    limiteEffective: accorde,
     autorise: true,
     limites,
-    consomme,
-    restant,
-    bridePar: limiteEffective < parPlan ? 'budget' : 'plan',
+    consomme: consommeApres,
+    restant: restantApres,
+    reserve: accorde,
+    bridePar: accorde < parPlan ? 'budget' : 'plan',
     message:
-      restant <= 3
-        ? `Il vous reste ${restant} résultat${restant > 1 ? 's' : ''} ce mois-ci.`
+      restantApres <= 3
+        ? `Il vous reste ${restantApres} résultat${restantApres > 1 ? 's' : ''} ce mois-ci.`
         : undefined,
   };
 }
@@ -310,59 +380,59 @@ export interface ConsommationResultat {
 }
 
 /**
- * Débite le nombre de résultats RÉELLEMENT renvoyés à l'utilisateur.
+ * Solde la réservation en libérant ce qui n'a pas été utilisé.
  *
- * `nombreResultats` doit être le compte APRÈS filtrage, c'est-à-dire la
- * longueur exacte du tableau envoyé au client.
+ * Le débit a déjà eu lieu au moment de la réservation, dans `resoudreQuota` :
+ * c'est ce qui rend le quota résistant à la concurrence. Il ne reste donc ici
+ * qu'à RENDRE la différence entre ce qui était réservé et ce qui a réellement
+ * été renvoyé.
  *
- * L'écriture est atomique et positionne la période dans la même requête : deux
- * recherches concurrentes ne peuvent pas réinitialiser le compteur toutes les
- * deux et s'offrir un budget neuf chacune.
+ * Une recherche sans résultat rend l'intégralité de sa réservation : elle ne
+ * coûte rien, sans qu'aucun trigger correctif ne soit nécessaire.
+ *
+ * `nombreResultats` doit être le compte APRÈS filtrage et APRÈS troncature,
+ * c'est-à-dire la longueur exacte du tableau envoyé au client.
  */
 export async function consommerResultats(
   organizationId: string,
   nombreResultats: number,
-  limites: LimitesPlan
+  limites: LimitesPlan,
+  reserve: number = 0
 ): Promise<ConsommationResultat> {
-  if (nombreResultats <= 0 || limites.resultatsParMois === null) {
-    return { consomme: 0, restant: limites.resultatsParMois === null ? null : 0, applique: false };
+  // Plan illimité, ou réservation impossible faute de colonne : rien à solder.
+  if (reserve <= 0 || limites.resultatsParMois === null) {
+    return {
+      consomme: 0,
+      restant: limites.resultatsParMois === null ? null : 0,
+      applique: false,
+    };
   }
 
-  const colonnesOrg = await getColonnes('organizations');
-  if (!colonnesOrg.has('monthly_results_used')) {
-    // Sans la colonne, on ne peut pas compter des résultats. On le signale
-    // plutôt que de débiter le compteur de requêtes, dont l'unité est autre.
-    console.warn(
-      '[QUOTA] organizations.monthly_results_used absente : consommation non ' +
-        'enregistree. Appliquer migrations/007_quota_resultats.sql.'
+  const aLiberer = Math.max(0, reserve - Math.max(0, nombreResultats));
+
+  if (aLiberer === 0) {
+    // Toute la réservation a servi : le compteur est déjà juste.
+    const solde = await query(
+      'SELECT monthly_results_used FROM organizations WHERE id = $1',
+      [organizationId]
     );
-    return { consomme: 0, restant: null, applique: false };
+    const consomme = Number(solde.rows[0]?.monthly_results_used ?? 0);
+    return {
+      consomme,
+      restant: Math.max(0, limites.resultatsParMois - consomme),
+      applique: true,
+    };
   }
 
-  const aColonneReset = colonnesOrg.has('monthly_searches_reset_at');
-
+  // Libération atomique. `GREATEST(..., 0)` empêche un compteur négatif si deux
+  // libérations se croisaient.
   const res = await query(
-    aColonneReset
-      ? `UPDATE organizations
-            SET monthly_results_used = CASE
-                  WHEN monthly_searches_reset_at IS NULL
-                    OR monthly_searches_reset_at < date_trunc('month', now())
-                  THEN $2
-                  ELSE COALESCE(monthly_results_used, 0) + $2 END,
-                monthly_searches_reset_at = CASE
-                  WHEN monthly_searches_reset_at IS NULL
-                    OR monthly_searches_reset_at < date_trunc('month', now())
-                  THEN date_trunc('month', now())
-                  ELSE monthly_searches_reset_at END,
-                updated_at = now()
-          WHERE id = $1
-          RETURNING monthly_results_used`
-      : `UPDATE organizations
-            SET monthly_results_used = COALESCE(monthly_results_used, 0) + $2,
-                updated_at = now()
-          WHERE id = $1
-          RETURNING monthly_results_used`,
-    [organizationId, nombreResultats]
+    `UPDATE organizations
+        SET monthly_results_used = GREATEST(COALESCE(monthly_results_used, 0) - $2, 0),
+            updated_at = now()
+      WHERE id = $1
+      RETURNING monthly_results_used`,
+    [organizationId, aLiberer]
   );
 
   const consomme = Number(res.rows[0]?.monthly_results_used ?? 0);

@@ -34,6 +34,12 @@ const nextConfig = {
   async headers() {
     const isDev = process.env.NODE_ENV !== 'production';
 
+    // Quand le mode nonce est actif, la CSP est posee par middleware.ts, qui
+    // seul peut generer une valeur par requete. En poser une ici en plus
+    // produirait deux en-tetes concurrents, et le plus restrictif gagnerait de
+    // facon imprevisible selon l'ordre d'application.
+    const cspGereeParMiddleware = process.env.CSP_NONCE === 'true';
+
     const csp = [
       "default-src 'self'",
       `script-src 'self' 'unsafe-inline'${isDev ? " 'unsafe-eval'" : ''} https://js.stripe.com`,
@@ -53,7 +59,9 @@ const nextConfig = {
       {
         source: '/:path*',
         headers: [
-          { key: 'Content-Security-Policy', value: csp },
+          ...(cspGereeParMiddleware
+            ? []
+            : [{ key: 'Content-Security-Policy', value: csp }]),
           // Empeche le navigateur de deviner un type MIME et d'executer une
           // reponse de donnees comme un script.
           { key: 'X-Content-Type-Options', value: 'nosniff' },

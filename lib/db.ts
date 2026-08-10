@@ -93,6 +93,23 @@ export function invaliderCacheColonnes(): void {
 }
 
 /**
+ * True si la table existe reellement.
+ *
+ * Cinq tables attendues par le code sont absentes de la production, dont
+ * `property_list_items` sur laquelle repose toute la fonctionnalite listes et
+ * favoris. Sans ce controle, un INSERT sur une table absente leve un 42P01 qui
+ * remonte en HTTP 500 opaque : l'utilisateur ne sait pas que la fonctionnalite
+ * n'est pas deployee, il croit a une panne.
+ *
+ * `getColonnes` renvoie un ensemble vide pour une table absente : on s'appuie
+ * sur cette propriete plutot que sur une seconde requete.
+ */
+export async function tableExiste(table: string): Promise<boolean> {
+  const colonnes = await getColonnes(table);
+  return colonnes.size > 0;
+}
+
+/**
  * Execute a function within a database transaction.
  * Automatically commits on success, rolls back on error.
  */

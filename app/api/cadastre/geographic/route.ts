@@ -5,11 +5,10 @@ import { logAudit, getIpFromRequest } from "@/lib/audit";
 import { erreurServeur } from '@/lib/api-error';
 import { normaliserEnrichissement, choisirParcellePrincipale } from "@/lib/enrichment-mapper";
 import { resoudreQuota, consommerResultats, blocQuota } from "@/lib/search-quota";
+import { CADASTRE_API_URL, CADASTRE_API_KEY } from "@/lib/cadastre-api";
 
 export const dynamic = 'force-dynamic';
 
-const CADASTRE_API_URL = process.env.CADASTRE_API_URL || 'http://84.247.175.132:8765';
-const CADASTRE_API_KEY = process.env.CADASTRE_API_KEY || '';
 
 // Timeout backend cadastre (le backend peut tenir plusieurs minutes)
 const BACKEND_TIMEOUT_MS = 120000;
@@ -272,7 +271,8 @@ export async function POST(req: NextRequest) {
     const consommation = await consommerResultats(
       organizationId,
       mappedResults.length,
-      quota.limites
+      quota.limites,
+      quota.reserve
     );
 
     // `total_dans_polygone` est le nombre REEL de proprietaires de la zone,

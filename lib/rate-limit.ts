@@ -55,7 +55,22 @@ export function getClientIP(req: Request): string {
     return maybeIp;
   }
 
+  // Dernier recours : l'en-tete X-Forwarded-For est conserve mais PREFIXE pour
+  // marquer explicitement qu'il n'est pas verifie.
+  //
+  // Le renvoyer tel quel rendait toutes les adresses du journal d'audit
+  // falsifiables par le client. Le remplacer par 'unknown' perdait en revanche
+  // toute valeur d'investigation. Le prefixe conserve l'information sans jamais
+  // laisser croire qu'elle est fiable.
+  const declare = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim();
+  if (declare) return `non-verifie:${declare}`;
+
   return 'unknown';
+}
+
+/** True si l'adresse provient d'une source non verifiee (voir getClientIP). */
+export function ipNonVerifiee(ip: string): boolean {
+  return ip.startsWith('non-verifie:') || ip === 'unknown';
 }
 
 /** Signale une seule fois que l'IP cliente n'est pas resoluble. */
@@ -96,7 +111,14 @@ interface CleComptage {
 }
 
 function construireCle(ip: string, action: string, discriminant?: string): CleComptage {
-  if (ip !== 'unknown') return { cle: `${action}:${ip}`, facteur: 1 };
+  // On n'accepte comme cle de comptage qu'une adresse VERIFIEE.
+  //
+  // getClientIP renvoie desormais `non-verifie:<adresse>` en dernier recours,
+  // pour conserver une valeur d'investigation dans le journal d'audit. Mais cette
+  // valeur vient d'un en-tete que le client controle : l'utiliser ici
+  // annulerait la limitation, puisqu'il suffirait de faire varier
+  // X-Forwarded-For a chaque tentative pour obtenir un compteur neuf.
+  if (!ipNonVerifiee(ip)) return { cle: `${action}:${ip}`, facteur: 1 };
 
   if (!avertissementIpEmis) {
     avertissementIpEmis = true;

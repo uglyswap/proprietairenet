@@ -3,6 +3,7 @@ import { authenticateRequest } from '@/lib/api-auth';
 import { query } from '@/lib/db';
 import { erreurServeur } from '@/lib/api-error';
 import { requireFeature } from "@/lib/plan-features";
+import { tableExiste, getColonnes } from '@/lib/db';
 
 export const dynamic = 'force-dynamic';
 
@@ -14,12 +15,23 @@ export async function GET(req: NextRequest) {
     const refusPlan = await requireFeature(auth, 'listes');
     if (refusPlan) return refusPlan;
 
+    // Trois adaptations au schema reel, chacune correspondant a un echec constate :
+    //  - le sous-select sur property_list_items : la table n'existe pas ;
+    //  - ORDER BY pl.updated_at : la colonne n'existe pas non plus, donc meme la
+    //    simple LECTURE des listes echouait ;
+    //  - le compteur retombe a 0 plutot que de faire tomber la requete entiere.
+    const colonnesListes = await getColonnes('property_lists');
+    const aItems = await tableExiste('property_list_items');
+    const colonneTri = colonnesListes.has('updated_at') ? 'pl.updated_at' : 'pl.created_at';
+
     const result = await query(
-      `SELECT pl.*, 
-        (SELECT COUNT(*) FROM property_list_items WHERE list_id = pl.id) as item_count
+      `SELECT pl.*,
+        ${aItems
+          ? '(SELECT COUNT(*) FROM property_list_items WHERE list_id = pl.id)'
+          : '0'} as item_count
        FROM property_lists pl
        WHERE pl.organization_id = $1
-       ORDER BY pl.updated_at DESC`,
+       ORDER BY ${colonneTri} DESC`,
       [auth.user.organization_id]
     );
 
@@ -40,11 +52,21 @@ export async function POST(req: NextRequest) {
     const { name, description, color } = await req.json();
     if (!name) return NextResponse.json({ error: 'Nom requis' }, { status: 400 });
 
+    const colonnesPourInsert = await getColonnes('property_lists');
+    const candidats: Array<[string, unknown]> = [
+      ['organization_id', auth.user.organization_id],
+      ['user_id', auth.user.id],
+      ['name', name],
+      ['description', description || null],
+      ['color', color || '#3B82F6'],
+    ];
+    const retenus = candidats.filter(([c]) => c === 'name' || colonnesPourInsert.has(c));
+
     const result = await query(
-      `INSERT INTO property_lists (organization_id, user_id, name, description, color)
-       VALUES ($1, $2, $3, $4, $5)
+      `INSERT INTO property_lists (${retenus.map(([c]) => c).join(', ')})
+       VALUES (${retenus.map((_, i) => `$${i + 1}`).join(', ')})
        RETURNING *`,
-      [auth.user.organization_id, auth.user.id, name, description || null, color || '#3B82F6']
+      retenus.map(([, v]) => v)
     );
 
     return NextResponse.json({ list: result.rows[0] }, { status: 201 });
